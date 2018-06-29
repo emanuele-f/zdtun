@@ -38,12 +38,13 @@ typedef struct {
 
 void con_parse_args(char **argv, con_mode_info *info);
 socket_t con_wait_connection(con_mode_info *info, struct sockaddr_in *cli_addr);
-void con_send(socket_t sock, const char*data, u_int32_t len);
-u_int32_t con_recv(socket_t sock, char*data, u_int32_t len);
+void con_send(socket_t sock, char *data, u_int32_t len);
+u_int32_t con_recv(socket_t sock, char *data, u_int32_t len);
 
 u_int16_t in_cksum(const char *buf, size_t nbytes, u_int32_t sum);
 u_int16_t tcp_checksum(const void *buff, size_t len, u_int32_t src_addr, u_int32_t dest_addr);
 u_int16_t ip_checksum(const void *buf, size_t hdr_len);
 char* ipv4str(u_int32_t addr, char *buf);
+void xor_encdec(char *data, int data_len, char *key);
 
 #endif

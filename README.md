@@ -114,4 +114,3 @@ minimal communication.
   - Implement library cleanup
   - Solve the error in gateway mode: "Packet too small for TCP" and "Packet too big!"
   - Add maximum number of connections and purge by sorting by timestamp
-  - Add simple encryption in examples (just to avoid sending cleartext)

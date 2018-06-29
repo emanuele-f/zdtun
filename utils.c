@@ -24,6 +24,9 @@
 #include "zdtun.h"
 #include "utils.h"
 
+// NOTE: xor is not safe!
+#define ENCODE_KEY "?!?0QAxAW1e.^9KJdma(//n PQe["
+
 /* ******************************************************* */
 
 static socket_t server_init(const char *address, int listen_port) {
@@ -113,8 +116,10 @@ socket_t con_wait_connection(con_mode_info *info, struct sockaddr_in *cli_addr) 
 
 /* ******************************************************* */
 
-void con_send(socket_t sock, const char*data, u_int32_t len) {
+void con_send(socket_t sock, char*data, u_int32_t len) {
   u_int32_t bo_len = htonl(len);
+
+  xor_encdec(data, len, ENCODE_KEY);
 
   // send the size
   send(sock, (char*)&bo_len, sizeof(bo_len), 0);
@@ -154,6 +159,7 @@ u_int32_t con_recv(socket_t sock, char*data, u_int32_t len) {
     sofar += n;
   }
 
+  xor_encdec(data, size, ENCODE_KEY);
   return size;
 }
 
@@ -238,4 +244,16 @@ static inline u_int16_t wrapsum(u_int32_t sum) {
 
 u_int16_t ip_checksum(const void *buf, size_t hdr_len) {
   return wrapsum(in_cksum(buf, hdr_len, 0));
+}
+
+/* ******************************************************* */
+
+// from ntopng
+void xor_encdec(char *data, int data_len, char *key) {
+  int i, y;
+
+  for(i = 0, y = 0; i < data_len; i++) {
+    data[i] ^= key[y++];
+    if(key[y] == 0) y = 0;
+  }
 }
