@@ -131,6 +131,9 @@ static void send_server(char *pkt_buf, u_int32_t pkt_size) {
 static void recv_server(char *buffer) {
   u_int32_t size = con_recv(server_sock, buffer, PACKET_BUFSIZE);
 
+  if(!size)
+    exit(1);
+
   debug("Got %u bytes from the server", size);
 
 #ifdef ENABLE_LOCAL_TEST
@@ -237,6 +240,6 @@ int main(int argc, char **argv) {
     }
 
     // no more requests supported
-    exit(0);
+    break;
   }
 }

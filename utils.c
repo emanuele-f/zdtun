@@ -136,8 +136,10 @@ u_int32_t con_recv(socket_t sock, char*data, u_int32_t len) {
   if((rv = recv(sock, (char*)&size, sizeof(size), 0)) == SOCKET_ERROR)
     fatal("recv error1: %d", socket_errno);
 
-  if(rv == 0)
-    fatal("peer disconnected");
+  if(rv == 0) {
+    error("peer disconnected");
+    return 0;
+  }
 
   size = ntohl(size);
 

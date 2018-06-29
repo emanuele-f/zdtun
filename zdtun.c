@@ -144,7 +144,8 @@ zdtun_t* zdtun_init(zdtun_send_client client_callback, void *udata) {
 /* ******************************************************* */
 
 void ztdun_finalize(zdtun_t *tun) {
-  // TODO close all the sockets
+  // purge all
+  zdtun_purge_expired(tun, 0);
 
   if(tun->icmp_socket)
     closesocket(tun->icmp_socket);
@@ -877,9 +878,7 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
 
 /* ******************************************************* */
 
-void zdtun_purge_expired(zdtun_t *tun) {
-  time_t now = time(NULL);
-
+void zdtun_purge_expired(zdtun_t *tun, time_t now) {
   debug("zdtun_purge_expired called");
 
   {

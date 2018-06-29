@@ -205,7 +205,7 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds);
  *
  * @param tun a zdtun instance.
  */
-void zdtun_purge_expired(zdtun_t *tun);
+void zdtun_purge_expired(zdtun_t *tun, time_t now);
 
 /*
  * Get zdtun statisticts.

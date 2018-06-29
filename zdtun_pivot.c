@@ -96,10 +96,12 @@ int main(int argc, char **argv) {
   if(!buffer)
     fatal("Cannot allocate packet buffer[%d]", errno);
 
+  zdtun_t *tun;
+  socket_t sock;
+
   while(true) {
     struct sockaddr_in client_addr;
-    socket_t sock = con_wait_connection(&info, &client_addr);
-    zdtun_t *tun = NULL;
+    sock = con_wait_connection(&info, &client_addr);
 
     char buf1[INET_ADDRSTRLEN];
     log("Client connection: %s", ipv4str(client_addr.sin_addr.s_addr, buf1));
@@ -138,6 +140,10 @@ int main(int argc, char **argv) {
         } else if (ret > 0) {
           if(FD_ISSET(sock, &fdset)) {
             u_int32_t size = con_recv(sock, buffer, PACKET_BUFSIZE);
+
+            if(!size)
+              break;
+
             debug("Got %u bytes from the client", size);
 
             zdtun_forward(tun, buffer, size);
@@ -150,12 +156,16 @@ int main(int argc, char **argv) {
 
       if(do_purge) {
         print_zdtun_stats(tun);
-        zdtun_purge_expired(tun);
         last_purge = time(NULL);
+        zdtun_purge_expired(tun, last_purge);
       }
     }
 
     // no more requests supported
-    exit(0);
+    break;
   }
+
+  free(buffer);
+  closesocket(sock);
+  ztdun_finalize(tun);
 }
