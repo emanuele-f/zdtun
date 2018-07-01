@@ -48,7 +48,7 @@ Cross platform build is provided by cmake.
 Preparation:
   - `mkdir Build`
   - `cd Build`
-  - `cmake ..`
+  - `cmake ..` (or `cmake -G "Visual Studio 15 Win64" ..` for a Windows x64 build)
 
 Build the zdtun library and the sample pivot program:
   - on Linux:
