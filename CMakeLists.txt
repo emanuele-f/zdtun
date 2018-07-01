@@ -6,10 +6,12 @@ project(C)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
 ADD_LIBRARY(zdtun STATIC zdtun.c utils.c)
+ADD_LIBRARY(zdtun_dbg STATIC zdtun.c utils.c)
 add_executable(zdtun_pivot zdtun_pivot.c)
 add_executable(zdtun_client zdtun_client.c utils.c)
 
-TARGET_LINK_LIBRARIES(zdtun_pivot zdtun)
+TARGET_LINK_LIBRARIES(zdtun_pivot zdtun_dbg)
+set_target_properties(zdtun PROPERTIES COMPILE_FLAGS -DNO_DEBUG)
 
 if(WIN32)
   target_link_libraries(zdtun_pivot ws2_32)

@@ -58,8 +58,14 @@
 #define log_tcp_window(...) {}
 #endif
 
+#ifndef NO_DEBUG
 #define log(...) { printf(__VA_ARGS__); fputc('\n', stdout); }
 #define error(...) { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); }
+#else
+#define log(...) {}
+#define error(...) {}
+#endif
+
 #define fatal(...) { error(__VA_ARGS__); exit(1); }
 
 #define NAT_IP_HEADER_SIZE 20

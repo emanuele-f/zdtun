@@ -58,6 +58,7 @@ Build the zdtun library and the sample pivot program:
   - on Windows:
 
     `MSBuild zdtun_pivot.vcxproj /t:Build /p:Configuration=Release`
+    `MSBuild zdtun.vcxproj /t:Build /p:Configuration=Release`
 
   The output is `Release\zdtun_pivot.exe`.
 
