@@ -38,8 +38,58 @@ Assumptions:
   - Only one client IP address at a time is using the pivot connection.
 
 The last assumption implies that, if you want to route multiple devices via a single
-pivot host connection, you will need to masquerade the client IPs with the client
+pivot host connection, you will need to masquerade the devices IP addresses with the client
 IP.
+
+## Sample Integration
+
+Here is how to use the zdtun api to integrate its VPN capabilities into an existing program and turn it into a zdtun pivot:
+
+```c
+#include "zdtun.h"
+
+/* This is called when zdtun needs to send data to the client */
+int send_pivot_callback(zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, void *udata) {
+  int cli_socket = *((int*)udata);
+
+  send(cli_socket, pkt_buf, pkt_size, 0);
+}
+
+int main() {
+  /* A TCP socket connected to the client */
+  socket_t cli_socket = ...;
+  ...
+
+  zdtun_t *tun = zdtun_init(send_pivot_callback, &cli_socket);
+
+  while(1) {
+    int max_fd = 0;
+    fd_set fdset;
+    fd_set wrfds;
+  
+    /* get zdtun own fds */
+    zdtun_fds(tun, &max_fd, &fdset, &wrfds);
+
+    /* Add client fd to the readable fds */
+    FD_SET(cli_socket, &fdset);
+
+    /* Wait for socket events */
+    select(max_fd + 1, &fdset, &wrfds, NULL, NULL);
+
+    if(FD_ISSET(cli_socket, &fdset)) {
+      /* Got data from the client, forward it to the private network */
+      size = recv(cli_socket, buffer, sizeof(buffer), 0);
+      zdtun_forward(tun, buffer, size);
+    } else {
+      /* let zdtun handle it */
+      zdtun_handle_fd(tun, &fdset, &wrfds);
+    }
+    
+  ztdun_finalize(tun);
+}
+```
+
+See `zdtun_pivot.c` for a complete example.
 
 ## Build
 
@@ -58,6 +108,7 @@ Build the zdtun library and the sample pivot program:
   - on Windows:
 
     `MSBuild zdtun_pivot.vcxproj /t:Build /p:Configuration=Release`
+
     `MSBuild zdtun.vcxproj /t:Build /p:Configuration=Release`
 
   The output is `Release\zdtun_pivot.exe`.
@@ -94,8 +145,7 @@ a channel.
 
 ## How It Works
 
-The pivot host running Zero Dep Tunnel keeps track of the client connections in
-a similar way as a NAT device would do.
+The pivot host running Zero Dep Tunnel keeps track of the client connections and opens sockets on demand toward the private network.
 
 When the client initiates a connection, the pivot creates a new socket towards
 the target host. It proxies subsequent packets from the client to the target and
