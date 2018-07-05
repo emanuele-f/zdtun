@@ -84,7 +84,8 @@ int main() {
       /* let zdtun handle it */
       zdtun_handle_fd(tun, &fdset, &wrfds);
     }
-    
+  }
+
   ztdun_finalize(tun);
 }
 ```
