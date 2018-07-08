@@ -54,10 +54,10 @@ static void print_zdtun_stats(zdtun_t *tun) {
   zdtun_get_stats(tun, stats);
 
   eprintf("**** NAT STATS ****\n");
-  eprintf("  num_open_fds: %u\n", stats->num_open_files);
   eprintf("  tot_icmp_opened: %u\n", stats->num_icmp_opened);
   eprintf("  tot_tcp_opened: %u\n", stats->num_tcp_opened);
   eprintf("  tot_udp_opened: %u\n\n", stats->num_udp_opened);
+  eprintf("  num_open_sockets: %u\n", stats->num_open_sockets);
   eprintf("  num_icmp_entries: %u\n", stats->num_icmp_entries);
   eprintf("  num_tcp_entries: %u\n", stats->num_tcp_entries);
   eprintf("  num_udp_entries: %u\n\n", stats->num_udp_entries);

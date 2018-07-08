@@ -102,6 +102,7 @@ typedef SOCKET socket_t;
 #else
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <unistd.h>
 #define socket_errno (errno)
 #define socket_in_progress (EINPROGRESS)
@@ -154,7 +155,7 @@ typedef struct zdtun_statistics {
   time_t oldest_tcp_entry;              ///< timestamp of the oldest active TCP connection
   time_t oldest_udp_entry;              ///< timestamp of the oldest active UDP connection
 
-  u_int32_t num_open_files;             ///< number of opened file descriptors
+  u_int32_t num_open_sockets;           ///< number of opened sockets in zdtun
 } zdtun_statistics_t;
 
 /*

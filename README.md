@@ -161,7 +161,8 @@ minimal communication.
 ## See Also
 
 - RAW sockets for pivoting, no Windows support, no API: https://github.com/0x36/VPNPivot
+- https://docs.microsoft.com/en-us/windows/desktop/winsock/maximum-number-of-sockets-supported-2
+- http://tangentsoft.net/wskfaq/advanced.html#maxsockets
 
 ## TODO
   - Solve the error in gateway mode: "Packet too small for TCP" and "Packet too big!"
-  - Add maximum number of connections and purge by sorting by timestamp

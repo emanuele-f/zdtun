@@ -21,16 +21,6 @@
  * 
  */
 
-#ifndef WIN32
-
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/resource.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-
-#endif // WIN32
-
 #include "zdtun.h"
 #include "utils.h"
 #include "third_party/uthlist.h"
@@ -44,9 +34,10 @@
 #define UDP_TIMEOUT_SEC 20
 #define TCP_TIMEOUT_SEC 15
 
-// NOTE: limit seems 63 on Windows
-#define MAX_TCP_CONNECTIONS 50
-#define TCP_CONNECTIONS_AFTER_PURGE 35
+// 64 is the per-thread limit on Winsocks
+// use a lower value to leave room for user defined connections
+#define MAX_NUM_SOCKETS 55
+#define NUM_SOCKETS_AFTER_PURGE 40
 
 /* ******************************************************* */
 
@@ -92,6 +83,7 @@ typedef struct zdtun_t {
   fd_set all_fds;
   fd_set tcp_connecting;
   int all_max_fd;
+  int num_open_socks;
   u_int32_t num_icmp_opened;
   u_int32_t num_tcp_opened;
   u_int32_t num_udp_opened;
@@ -140,6 +132,7 @@ zdtun_t* zdtun_init(zdtun_send_client client_callback, void *udata) {
 #ifndef WIN32
     tun->all_max_fd = max(tun->all_max_fd, tun->icmp_socket);
 #endif
+    tun->num_open_socks++;
   }
 
   return tun;
@@ -167,6 +160,7 @@ static inline void finalize_zdtun_sock(zdtun_t *tun, struct nat_entry *entry) {
 #ifndef WIN32
   tun->all_max_fd = max(tun->all_max_fd, entry->sock-1);
 #endif
+  tun->num_open_socks--;
 
   // mark as closed
   entry->sock = 0;
@@ -363,6 +357,11 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
       return 1;
     }
 
+    if(tun->num_open_socks >= MAX_NUM_SOCKETS) {
+      debug("Force purge!");
+      zdtun_purge_expired(tun, time(NULL));
+    }
+
     debug("Allocating new TCP socket for port %d", ntohs(data->th_sport));
     socket_t tcp_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
 
@@ -420,6 +419,7 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
 #ifndef WIN32
     tun->all_max_fd = max(tun->all_max_fd, tcp_sock);
 #endif
+    tun->num_open_socks++;
 
     if(!in_progress)
       return tcp_socket_syn(tun, entry);
@@ -494,6 +494,11 @@ static int handle_udp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
   LL_SEARCH_2SCALARS(tun->udp_nat_table, entry, src_port, dest_port, data->uh_sport, data->uh_dport);
 
   if(!entry) {
+    if(tun->num_open_socks >= MAX_NUM_SOCKETS) {
+      debug("Force purge!");
+      zdtun_purge_expired(tun, time(NULL));
+    }
+
     socket_t udp_sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
     debug("Allocating new UDP socket for port %d", ntohs(data->uh_sport));
 
@@ -506,6 +511,7 @@ static int handle_udp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
 #ifndef WIN32    
     tun->all_max_fd = max(tun->all_max_fd, udp_sock);
 #endif
+    tun->num_open_socks++;
 
     tun->num_udp_opened++;
     safe_alloc(entry, struct nat_entry);
@@ -887,7 +893,7 @@ static inline int nat_entry_cmp_timestamp_asc(struct nat_entry *a, struct nat_en
   return(a->tstamp - b->tstamp);
 }
 
-static int purge_tcp_entry(zdtun_t *tun, struct nat_entry *entry, struct nat_entry *prev) {
+static void purge_tcp_entry(zdtun_t *tun, struct nat_entry *entry, struct nat_entry *prev) {
   // Send TCP RST
   build_tcp_ip_header(tun, entry, TH_RST | TH_ACK, 0);
   tun->recv_callback(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
@@ -915,12 +921,25 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now) {
     }
   }
 
+  /* TCP/ICMP */
   struct nat_entry *entry, *tmp, *prev;
+  int forced_tcp_purge = 0;
+  int forced_udp_purge = 0;
 
-  u_int num_opened_tcp;
-  LL_COUNT(tun->tcp_nat_table, entry, num_opened_tcp);
+  if(tun->num_open_socks >= MAX_NUM_SOCKETS) {
+    int num_opened_tcp, num_opened_udp;
 
-  if(num_opened_tcp >= MAX_TCP_CONNECTIONS) {
+    LL_COUNT(tun->tcp_nat_table, entry, num_opened_tcp);
+    LL_COUNT(tun->udp_nat_table, entry, num_opened_udp);
+
+    if(num_opened_tcp > num_opened_udp)
+      forced_tcp_purge = tun->num_open_socks - NUM_SOCKETS_AFTER_PURGE;
+    else
+      forced_udp_purge = tun->num_open_socks - NUM_SOCKETS_AFTER_PURGE;
+  }
+
+  /* TCP */
+  if(forced_tcp_purge) {
     /* Force purge */
     LL_SORT(tun->tcp_nat_table, nat_entry_cmp_timestamp_asc);
 
@@ -928,7 +947,7 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now) {
       debug("FORCE TCP PURGE");
       purge_tcp_entry(tun, entry, NULL);
 
-      if(--num_opened_tcp <= TCP_CONNECTIONS_AFTER_PURGE)
+      if(--forced_tcp_purge <= 0)
         break;
     }
   } else {
@@ -943,14 +962,29 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now) {
     }
   }
 
-  prev = NULL;
-  LL_FOREACH_SAFE(tun->udp_nat_table, entry, tmp) {
-    if((now - entry->tstamp) >= UDP_TIMEOUT_SEC) {
-      debug("IDLE UDP");
+  /* UDP */
+  if(forced_udp_purge) {
+    /* Force purge */
+    LL_SORT(tun->udp_nat_table, nat_entry_cmp_timestamp_asc);
 
-      purge_nat_entry(tun, entry, &tun->udp_nat_table, prev);
-    } else
-      prev = entry;
+    LL_FOREACH_SAFE(tun->udp_nat_table, entry, tmp) {
+      debug("FORCE UDP PURGE");
+      purge_nat_entry(tun, entry, &tun->udp_nat_table, NULL);
+
+      if(--forced_udp_purge <= 0)
+        break;
+    }
+  } else {
+    /* Idle purge */
+    prev = NULL;
+    LL_FOREACH_SAFE(tun->udp_nat_table, entry, tmp) {
+      if((now - entry->tstamp) >= UDP_TIMEOUT_SEC) {
+        debug("IDLE UDP");
+
+        purge_nat_entry(tun, entry, &tun->udp_nat_table, prev);
+      } else
+        prev = entry;
+    }
   }
 }
 
@@ -977,16 +1011,7 @@ void zdtun_get_stats(zdtun_t *tun, zdtun_statistics_t *stats) {
     stats->oldest_udp_entry = (stats->oldest_udp_entry) ? (min(stats->oldest_udp_entry, entry->tstamp)) : entry->tstamp;
   }
 
-#ifndef WIN32
-  struct stat fstats;
-  for(int i=0; i <= getdtablesize(); i++) {
-    errno = 0;
-    fstat(i, &fstats);
-
-    if(errno != EBADF)
-      stats->num_open_files++;
-  }
-#endif
+  stats->num_open_sockets = tun->num_open_socks;
 
   // totals
   stats->num_icmp_opened = tun->num_icmp_opened;
