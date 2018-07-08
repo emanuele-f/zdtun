@@ -44,6 +44,10 @@
 #define UDP_TIMEOUT_SEC 20
 #define TCP_TIMEOUT_SEC 15
 
+// NOTE: limit seems 63 on Windows
+#define MAX_TCP_CONNECTIONS 50
+#define TCP_CONNECTIONS_AFTER_PURGE 35
+
 /* ******************************************************* */
 
 struct icmp_nat_entry {
@@ -878,6 +882,19 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
 
 /* ******************************************************* */
 
+// negative, zero, or positive <=> A before, equal to, or after B
+static inline int nat_entry_cmp_timestamp_asc(struct nat_entry *a, struct nat_entry *b) {
+  return(a->tstamp - b->tstamp);
+}
+
+static int purge_tcp_entry(zdtun_t *tun, struct nat_entry *entry, struct nat_entry *prev) {
+  // Send TCP RST
+  build_tcp_ip_header(tun, entry, TH_RST | TH_ACK, 0);
+  tun->recv_callback(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
+
+  purge_nat_entry(tun, entry, &tun->tcp_nat_table, prev);
+}
+
 void zdtun_purge_expired(zdtun_t *tun, time_t now) {
   debug("zdtun_purge_expired called");
 
@@ -900,18 +917,30 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now) {
 
   struct nat_entry *entry, *tmp, *prev;
 
-  prev = NULL;
-  LL_FOREACH_SAFE(tun->tcp_nat_table, entry, tmp) {
-    if((now - entry->tstamp) >= TCP_TIMEOUT_SEC) {
-      debug("IDLE TCP");
+  u_int num_opened_tcp;
+  LL_COUNT(tun->tcp_nat_table, entry, num_opened_tcp);
 
-      // Send TCP RST
-      build_tcp_ip_header(tun, entry, TH_RST | TH_ACK, 0);
-      tun->recv_callback(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
+  if(num_opened_tcp >= MAX_TCP_CONNECTIONS) {
+    /* Force purge */
+    LL_SORT(tun->tcp_nat_table, nat_entry_cmp_timestamp_asc);
 
-      purge_nat_entry(tun, entry, &tun->tcp_nat_table, prev);
-    } else
-      prev = entry;
+    LL_FOREACH_SAFE(tun->tcp_nat_table, entry, tmp) {
+      debug("FORCE TCP PURGE");
+      purge_tcp_entry(tun, entry, NULL);
+
+      if(--num_opened_tcp <= TCP_CONNECTIONS_AFTER_PURGE)
+        break;
+    }
+  } else {
+    /* Idle purge */
+    prev = NULL;
+    LL_FOREACH_SAFE(tun->tcp_nat_table, entry, tmp) {
+      if((now - entry->tstamp) >= TCP_TIMEOUT_SEC) {
+        debug("IDLE TCP");
+        purge_tcp_entry(tun, entry, prev);
+      } else
+        prev = entry;
+    }
   }
 
   prev = NULL;
