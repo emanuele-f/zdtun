@@ -1007,7 +1007,7 @@ void zdtun_get_stats(zdtun_t *tun, zdtun_statistics_t *stats) {
   }
 
   LL_FOREACH(tun->udp_nat_table, entry) {
-    stats->num_tcp_entries++;
+    stats->num_udp_entries++;
     stats->oldest_udp_entry = (stats->oldest_udp_entry) ? (min(stats->oldest_udp_entry, entry->tstamp)) : entry->tstamp;
   }
 
