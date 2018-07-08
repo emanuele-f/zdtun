@@ -34,7 +34,7 @@
 /* ********************************* */
 
 /* DEBUG OPTIONS */
-//#define SHOW_DEBUG
+#define SHOW_DEBUG
 //#define SHOW_PACKETS_LOG
 //#define SHOW_TCP_WINDOW_LOG
 
