@@ -52,7 +52,6 @@
 
 #define TUN_MTU 1500
 #define PACKET_BUFSIZE 65535
-#define SECONDS_BEFORE_PURGE 1
 
 /* ******************************************************* */
 
@@ -217,7 +216,7 @@ int main(int argc, char **argv) {
       max_fd = max(max_fd, server_sock);
 
       struct timeval tv = {0};
-      tv.tv_sec = SECONDS_BEFORE_PURGE;
+      tv.tv_sec = 1;
 
       int ret = select(max_fd + 1, &fdset, NULL, NULL, &tv);
 

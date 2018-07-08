@@ -16,13 +16,16 @@ set_target_properties(zdtun PROPERTIES COMPILE_FLAGS -DNO_DEBUG)
 if(WIN32)
   target_link_libraries(zdtun_pivot ws2_32)
   add_definitions(-DWIN32)
+
+  # assume LITTLE_ENDIAN on Windows
 else()
   set(CMAKE_C_COMPILER gcc)
   set(CMAKE_C_FLAGS "-Wall -Wno-unused-variable -Wno-unused-function -g")
+
+  include (TestBigEndian)
+  TEST_BIG_ENDIAN(IS_BIG_ENDIAN)
 endif()
 
-include (TestBigEndian)
-TEST_BIG_ENDIAN(IS_BIG_ENDIAN)
 if(IS_BIG_ENDIAN)
  message(STATUS "BIG_ENDIAN")
  add_definitions(-D_BIG_ENDIAN)
