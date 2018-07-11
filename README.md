@@ -165,4 +165,4 @@ minimal communication.
 - http://tangentsoft.net/wskfaq/advanced.html#maxsockets
 
 ## TODO
-  - Solve the error in gateway mode: "Packet too small for TCP" and "Packet too big!"
+  - Ignore SIGPIPE signal

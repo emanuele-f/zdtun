@@ -24,6 +24,8 @@
 #include "zdtun.h"
 #include "utils.h"
 
+//#define DEBUG_COMMUNICATION
+
 // NOTE: xor is not safe!
 #define ENCODE_KEY "?!?0QAxAW1e.^9KJdma(//n PQe["
 
@@ -116,8 +118,17 @@ socket_t con_wait_connection(con_mode_info *info, struct sockaddr_in *cli_addr) 
 
 /* ******************************************************* */
 
+#ifdef DEBUG_COMMUNICATION
+static u_int32_t send_ctr = 0;
+static u_int32_t recv_ctr = 0;
+#endif
+
 void con_send(socket_t sock, char*data, u_int32_t len) {
   u_int32_t bo_len = htonl(len);
+
+#ifdef DEBUG_COMMUNICATION
+  log("[SEND] %u bytes #[%u]", len, send_ctr++);
+#endif
 
   xor_encdec(data, len, ENCODE_KEY);
 
@@ -130,30 +141,40 @@ void con_send(socket_t sock, char*data, u_int32_t len) {
 
 u_int32_t con_recv(socket_t sock, char*data, u_int32_t len) {
   u_int32_t size;
-  int rv;
+  u_int32_t sofar;
 
   // read the size
-  if((rv = recv(sock, (char*)&size, sizeof(size), 0)) == SOCKET_ERROR)
-    fatal("recv error1: %d", socket_errno);
+  sofar = 0;
 
-  if(rv == 0) {
-    error("peer disconnected");
-    return 0;
+  while(sofar < sizeof(size)) {
+    int n = recv(sock, &((char*)&size)[sofar], sizeof(size) - sofar, 0);
+
+    if(n == SOCKET_ERROR)
+      fatal("recv error2: %d", socket_errno);
+
+    if(n == 0)
+      fatal("peer disconnected");
+
+    sofar += n;
   }
 
   size = ntohl(size);
 
-  if(size > len)
-    fatal("Packet too big!");
+#ifdef DEBUG_COMMUNICATION
+    log("[RECV] %u bytes #[%u]", len, recv_ctr++);
+#endif
 
-  u_int32_t sofar = 0;
+  if(size > len)
+    fatal("Packet too big! [%u > %u]", size, len);
 
   // read the data
+  sofar = 0;
+
   while(sofar < size) {
     int n = recv(sock, &data[sofar], size - sofar, 0);
 
     if(n == SOCKET_ERROR)
-      fatal("recv error2: %d", socket_errno);
+      fatal("recv error3: %d", socket_errno);
 
     if(n == 0)
       fatal("peer disconnected");

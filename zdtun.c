@@ -446,6 +446,9 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
     tun->recv_callback(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
     purge_nat_entry_full(tun, entry, &tun->tcp_nat_table);
     return 1;
+  } else if(!entry->sock) {
+    debug("Ignore write on closed socket");
+    return 1;
   }
 
   // payload data (avoid sending ACK to an ACK)
