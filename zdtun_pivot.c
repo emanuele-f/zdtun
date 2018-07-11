@@ -30,6 +30,10 @@
 #include "zdtun.h"
 #include "utils.h"
 
+#ifndef WIN32
+#include <signal.h>
+#endif
+
 #define PACKET_BUFSIZE 65535
 #define MAX_PURGE_SECS 3
 
@@ -75,14 +79,14 @@ int main(int argc, char **argv) {
   WSADATA wsaData;
 
   wVersionRequested = MAKEWORD(2, 2);
-#endif
 
-#ifdef WIN32
   int err = WSAStartup(wVersionRequested, &wsaData);
 
   err = WSAStartup(wVersionRequested, &wsaData);
   if(err != 0)
     fatal("WSAStartup failed with error: %d\n", err);
+#else
+  signal(SIGPIPE, SIG_IGN);
 #endif
 
   if(argc != 3)

@@ -92,6 +92,9 @@ int main() {
 
 See `zdtun_pivot.c` for a complete example.
 
+NOTE: when running the pivot on linux, it's necessary to mask/handle the *SIGPIPE*
+signal, which can occur while sending data.
+
 ## Build
 
 Cross platform build is provided by cmake.
@@ -163,6 +166,3 @@ minimal communication.
 - RAW sockets for pivoting, no Windows support, no API: https://github.com/0x36/VPNPivot
 - https://docs.microsoft.com/en-us/windows/desktop/winsock/maximum-number-of-sockets-supported-2
 - http://tangentsoft.net/wskfaq/advanced.html#maxsockets
-
-## TODO
-  - Ignore SIGPIPE signal
