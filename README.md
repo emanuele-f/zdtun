@@ -166,3 +166,4 @@ minimal communication.
 - RAW sockets for pivoting, no Windows support, no API: https://github.com/0x36/VPNPivot
 - https://docs.microsoft.com/en-us/windows/desktop/winsock/maximum-number-of-sockets-supported-2
 - http://tangentsoft.net/wskfaq/advanced.html#maxsockets
+- Reverse tethering on android devices, employing a similar tecnique: https://github.com/Genymobile/gnirehtet/blob/master/DEVELOP.md
