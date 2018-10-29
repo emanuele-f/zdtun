@@ -675,7 +675,7 @@ static int handle_icmp_reply(zdtun_t *tun) {
   entry->icmp_seq = 0;
 
   data->checksum = 0;
-  data->checksum = htons(~in_cksum(payload_ptr, l3_len, 0));
+  data->checksum = htons(~in_cksum(data, l3_len, 0));
 
   build_ip_header_raw(tun->reply_buf, l2_len, IPPROTO_ICMP, entry->dest_ip, entry->src_ip);
 
