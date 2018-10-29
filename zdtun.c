@@ -352,7 +352,7 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
 
   if(!entry) {
     // New connection
-    if(data->th_flags != TH_SYN) {
+    if(!(data->th_flags & TH_SYN) || (data->th_flags & TH_ACK)) {
       debug("TCP: ignoring non SYN connection");
       return 1;
     }
@@ -433,15 +433,17 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
   entry->src_ip = ip_header->saddr;
   entry->dest_ip = ip_header->daddr;
 
+  const size_t tcp_payload_size = pkt_len - ip_hdr_len - tcp_header_len;
+
   if(data->th_flags & TH_RST) {
     debug("Got TCP reset from client");
     purge_nat_entry_full(tun, entry, &tun->tcp_nat_table);
     return 1;
-  } else if(data->th_flags == (TH_FIN | TH_ACK)) {
+  } else if((data->th_flags & (TH_FIN | TH_ACK)) == (TH_FIN | TH_ACK)) {
     debug("Got TCP FIN+ACK from client");
 
-    entry->tcp_client_seq += 1;
-    build_tcp_ip_header(tun, entry, TH_ACK, 0);
+    entry->tcp_client_seq += tcp_payload_size + 1;
+    build_tcp_ip_header(tun, entry, TH_FIN | TH_ACK, 0);
 
     tun->recv_callback(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
     purge_nat_entry_full(tun, entry, &tun->tcp_nat_table);
@@ -451,14 +453,12 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
     return 1;
   }
 
-  // payload data (avoid sending ACK to an ACK)
-  const size_t tcp_payload_size = pkt_len - ip_hdr_len - tcp_header_len;
-
   if(data->th_flags & TH_ACK) {
     entry->tcp_window_size = (entry->tcp_zdtun_seq - ntohl(data->th_ack)) + ntohs(data->th_win);
     process_pending_tcp_packets(tun, entry);
   }
 
+  // payload data (avoid sending ACK to an ACK)
   if(tcp_payload_size > 0) {
     if(send(entry->sock, ((char*)data) + tcp_header_len, tcp_payload_size, 0) < 0) {
       error("TCP send error[%d]", socket_errno);
