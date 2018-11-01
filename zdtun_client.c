@@ -81,8 +81,13 @@ static int open_tun(const char *tun_dev, const char*ip, const char *netmask) {
   if(rc < 0)
     fatal("ioctl failed[%d]: %s", rc, strerror(errno));
 
-  // set IP address and bring up
-  snprintf(cmd_buf, sizeof(cmd_buf), "/sbin/ifconfig %s %s netmask %s mtu %d up", tun_dev, ip, netmask, TUN_MTU);
+  // set IPv4 address
+  snprintf(cmd_buf, sizeof(cmd_buf), "/sbin/ip addr add %s/%s dev %s", ip, netmask, tun_dev);
+  debug("CMD: %s", cmd_buf);
+  system(cmd_buf);
+
+  // bring device upaddr add dev %s %s/ netmask %s mtu %d up
+  snprintf(cmd_buf, sizeof(cmd_buf), "/sbin/ip link set dev %s mtu %d up", tun_dev, TUN_MTU);
   debug("CMD: %s", cmd_buf);
   system(cmd_buf);
 
@@ -101,7 +106,7 @@ static void send_server(char *pkt_buf, u_int32_t pkt_size) {
 
   if(ip_header->saddr != tun_ip_addr) {
     char buf[INET_ADDRSTRLEN];
-    log("[WARNING] Refusing to route packet from %s", ipv4str(ip_header->saddr, buf));
+    debug("Refusing to route packet from %s", ipv4str(ip_header->saddr, buf));
     return;
   }
 
