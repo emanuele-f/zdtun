@@ -9,7 +9,7 @@ if(ANDROID)
   ADD_LIBRARY(zdtun SHARED zdtun.c utils.c)
 
   TARGET_LINK_LIBRARIES(zdtun)
-else
+else()
   ADD_LIBRARY(zdtun STATIC zdtun.c utils.c)
   ADD_LIBRARY(zdtun_dbg STATIC zdtun.c utils.c)
 
