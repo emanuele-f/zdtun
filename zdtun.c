@@ -83,7 +83,9 @@ typedef struct zdtun_t {
   u_int32_t num_icmp_opened;
   u_int32_t num_tcp_opened;
   u_int32_t num_udp_opened;
+#ifndef ZDTUN_SKIP_ICMP
   socket_t icmp_socket;
+#endif
   char reply_buf[REPLY_BUF_SIZE];
 
   struct nat_entry *icmp_nat_table;
@@ -117,6 +119,14 @@ zdtun_t* zdtun_init(zdtun_send_client client_callback, void *udata) {
   FD_ZERO(&tun->all_fds);
   FD_ZERO(&tun->tcp_connecting);
 
+#ifndef ZDTUN_SKIP_ICMP
+  /* NOTE:
+   *  - on linux, socket(PF_INET, SOCK_DGRAM, IPPROTO_ICMP) is not permitted
+   *  - on Android, socket(PF_INET, SOCK_RAW, IPPROTO_ICMP) is not permitted
+   *
+   * Supporting a SOCK_DGRAM requires some changes as the IP data is missing
+   * and sendto must be used.
+   */
   tun->icmp_socket = socket(PF_INET, SOCK_RAW, IPPROTO_ICMP);
 
   if(tun->icmp_socket == INVALID_SOCKET) {
@@ -130,6 +140,7 @@ zdtun_t* zdtun_init(zdtun_send_client client_callback, void *udata) {
 #endif
     tun->num_open_socks++;
   }
+#endif
 
   return tun;
 }
@@ -140,8 +151,10 @@ void ztdun_finalize(zdtun_t *tun) {
   // purge all
   zdtun_purge_expired(tun, 0);
 
+#ifndef ZDTUN_SKIP_ICMP
   if(tun->icmp_socket)
     closesocket(tun->icmp_socket);
+#endif
 
   free(tun);
 }
@@ -541,6 +554,8 @@ static int handle_udp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
 
 /* ******************************************************* */
 
+#ifndef ZDTUN_SKIP_ICMP
+
 /* NOTE: a collision may occure between ICMP packets seq from host and tunneled packets, we ignore it */
 static int handle_icmp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
   struct iphdr *ip_header = (struct iphdr*) pkt_buf;
@@ -590,6 +605,8 @@ static int handle_icmp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
   return 0;
 }
 
+#endif
+
 /* ******************************************************* */
 
 int zdtun_forward(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
@@ -616,9 +633,11 @@ int zdtun_forward(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
     case IPPROTO_UDP:
       rv = handle_udp_nat(tun, pkt_buf, pkt_len);
       break;
+#ifndef ZDTUN_SKIP_ICMP
     case IPPROTO_ICMP:
       rv = handle_icmp_nat(tun, pkt_buf, pkt_len);
       break;
+#endif
     default:
       error("Ignoring unhandled IP protocol %d", ip_header->protocol);
       return -2;
@@ -628,6 +647,8 @@ int zdtun_forward(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
 }
 
 /* ******************************************************* */
+
+#ifndef ZDTUN_SKIP_ICMP
 
 static int handle_icmp_reply(zdtun_t *tun) {
   char *payload_ptr = tun->reply_buf;
@@ -680,6 +701,8 @@ static int handle_icmp_reply(zdtun_t *tun) {
 
   return tun->recv_callback(tun, tun->reply_buf, l2_len, tun->user_data);
 }
+
+#endif
 
 /* ******************************************************* */
 
@@ -839,10 +862,12 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
   int num_hits = 0;
   struct nat_entry *entry, *prev, *tmp;
 
+#ifndef ZDTUN_SKIP_ICMP
   if(FD_ISSET(tun->icmp_socket, rd_fds)) {
     handle_icmp_reply(tun);
     num_hits++;
   }
+#endif
 
   prev = NULL;
   LL_FOREACH_SAFE(tun->tcp_nat_table, entry, tmp) {
