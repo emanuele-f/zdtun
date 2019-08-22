@@ -74,7 +74,7 @@ struct nat_entry {
 /* ******************************************************* */
 
 typedef struct zdtun_t {
-  zdtun_send_client recv_callback;
+  struct zdtun_callbacks callbacks;
   void *user_data;
   fd_set all_fds;
   fd_set tcp_connecting;
@@ -104,7 +104,29 @@ void zdtun_fds(zdtun_t *tun, int *max_fd, fd_set *rdfd, fd_set *wrfd) {
 
 /* ******************************************************* */
 
-zdtun_t* zdtun_init(zdtun_send_client client_callback, void *udata) {
+static socket_t open_socket(zdtun_t *tun, int domain, int type, int protocol) {
+  socket_t sock = socket(domain, type, protocol);
+
+  if((sock != INVALID_SOCKET) && tun->callbacks.on_socket_open)
+    tun->callbacks.on_socket_open(sock, tun->user_data);
+
+  return(sock);
+}
+
+/* ******************************************************* */
+
+static int close_socket(zdtun_t *tun, socket_t sock) {
+  int rv = closesocket(sock);
+
+  if((rv == 0) && tun->callbacks.on_socket_close)
+    tun->callbacks.on_socket_close(sock, tun->user_data);
+
+  return(rv);
+}
+
+/* ******************************************************* */
+
+zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
   zdtun_t *tun;
   safe_alloc(tun, zdtun_t);
 
@@ -113,8 +135,18 @@ zdtun_t* zdtun_init(zdtun_send_client client_callback, void *udata) {
     return NULL;
   }
 
-  tun->recv_callback = client_callback;
+  /* Verify mandatory callbacks */
+  if(!callbacks) {
+    error("callbacks parameter is NULL");
+    return NULL;
+  }
+  if(!callbacks->send_client) {
+    error("missing mandatory send_client callback");
+    return NULL;
+  }
+
   tun->user_data = udata;
+  memcpy(&tun->callbacks, callbacks, sizeof(tun->callbacks));
 
   FD_ZERO(&tun->all_fds);
   FD_ZERO(&tun->tcp_connecting);
@@ -127,7 +159,7 @@ zdtun_t* zdtun_init(zdtun_send_client client_callback, void *udata) {
    * Supporting a SOCK_DGRAM requires some changes as the IP data is missing
    * and sendto must be used.
    */
-  tun->icmp_socket = socket(PF_INET, SOCK_RAW, IPPROTO_ICMP);
+  tun->icmp_socket = open_socket(tun, PF_INET, SOCK_RAW, IPPROTO_ICMP);
 
   if(tun->icmp_socket == INVALID_SOCKET) {
     error("Cannot create ICMP socket[%d]", socket_errno);
@@ -153,7 +185,7 @@ void ztdun_finalize(zdtun_t *tun) {
 
 #ifndef ZDTUN_SKIP_ICMP
   if(tun->icmp_socket)
-    closesocket(tun->icmp_socket);
+    close_socket(tun, tun->icmp_socket);
 #endif
 
   free(tun);
@@ -162,7 +194,7 @@ void ztdun_finalize(zdtun_t *tun) {
 /* ******************************************************* */
 
 static inline void finalize_zdtun_sock(zdtun_t *tun, struct nat_entry *entry) {
-  closesocket(entry->sock);
+  close_socket(tun, entry->sock);
   FD_CLR(entry->sock, &tun->all_fds);
   FD_CLR(entry->sock, &tun->tcp_connecting);
 
@@ -288,7 +320,7 @@ static int tcp_socket_syn(zdtun_t *tun, struct nat_entry *entry) {
   build_tcp_ip_header(tun, entry, TH_SYN | TH_ACK, 0);
   entry->tcp.zdtun_seq += 1;
 
-  return tun->recv_callback(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
+  return tun->callbacks.send_client(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
 }
 
 /* ******************************************************* */
@@ -297,7 +329,7 @@ static void tcp_socket_fin_ack(zdtun_t *tun, struct nat_entry *entry) {
   build_tcp_ip_header(tun, entry, TH_FIN | TH_ACK, 0);
   entry->tcp.zdtun_seq += 1;
 
-  tun->recv_callback(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
+  tun->callbacks.send_client(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
 }
 
 /* ******************************************************* */
@@ -316,7 +348,7 @@ static void process_pending_tcp_packets(zdtun_t *tun, struct nat_entry *entry) {
 
   // NAT back the TCP port and reconstruct the TCP header
   build_tcp_ip_header(tun, entry, TH_PUSH | TH_ACK, to_send);
-  tun->recv_callback(tun, tun->reply_buf, to_send + MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
+  tun->callbacks.send_client(tun, tun->reply_buf, to_send + MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
 
   entry->tcp.zdtun_seq += to_send;
   entry->tcp.window_size -= to_send;
@@ -372,7 +404,7 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
     }
 
     debug("Allocating new TCP socket for port %d", ntohs(data->th_sport));
-    socket_t tcp_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    socket_t tcp_sock = open_socket(tun, PF_INET, SOCK_STREAM, IPPROTO_TCP);
 
     if(tcp_sock == INVALID_SOCKET) {
       error("Cannot create TCP socket[%d]", socket_errno);
@@ -406,7 +438,7 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
         in_progress = true;
       } else {
         log("TCP connection error");
-        closesocket(tcp_sock);
+        close_socket(tun, tcp_sock);
         return -1;
       }
     }
@@ -454,7 +486,7 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
     entry->tcp.client_seq += tcp_payload_size + 1;
     build_tcp_ip_header(tun, entry, TH_FIN | TH_ACK, 0);
 
-    tun->recv_callback(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
+    tun->callbacks.send_client(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
     purge_nat_entry_full(tun, entry, &tun->tcp_nat_table);
     return 1;
   } else if(!entry->sock) {
@@ -479,7 +511,7 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
     entry->tcp.client_seq += tcp_payload_size;
     build_tcp_ip_header(tun, entry, TH_ACK, 0);
 
-    return tun->recv_callback(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
+    return tun->callbacks.send_client(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
   }
 
   return 0;
@@ -511,7 +543,7 @@ static int handle_udp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len) {
       zdtun_purge_expired(tun, time(NULL));
     }
 
-    socket_t udp_sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    socket_t udp_sock = open_socket(tun, PF_INET, SOCK_DGRAM, IPPROTO_UDP);
     debug("Allocating new UDP socket for port %d", ntohs(data->uh_sport));
 
     if(udp_sock == INVALID_SOCKET) {
@@ -699,7 +731,7 @@ static int handle_icmp_reply(zdtun_t *tun) {
   ip_header->check = 0;
   ip_header->check = ip_checksum(ip_header, ip_header_size);
 
-  return tun->recv_callback(tun, tun->reply_buf, l2_len, tun->user_data);
+  return tun->callbacks.send_client(tun, tun->reply_buf, l2_len, tun->user_data);
 }
 
 #endif
@@ -767,7 +799,7 @@ static int handle_tcp_reply(zdtun_t *tun, struct nat_entry *entry, struct nat_en
   entry->tcp.zdtun_seq += l4_len;
   entry->tcp.window_size -= l4_len;
 
-  tun->recv_callback(tun, tun->reply_buf, l4_len + MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
+  tun->callbacks.send_client(tun, tun->reply_buf, l4_len + MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
 
   // ok
   return 1;
@@ -819,7 +851,7 @@ static int handle_udp_reply(zdtun_t *tun, struct nat_entry *entry, struct nat_en
   ip_header->check = 0;
   ip_header->check = ip_checksum(ip_header, NAT_IP_HEADER_SIZE);
 
-  tun->recv_callback(tun, tun->reply_buf, l3_len + NAT_IP_HEADER_SIZE, tun->user_data);
+  tun->callbacks.send_client(tun, tun->reply_buf, l3_len + NAT_IP_HEADER_SIZE, tun->user_data);
 
   // ok
   entry->tstamp = time(NULL);
@@ -920,7 +952,7 @@ static inline int nat_entry_cmp_timestamp_asc(struct nat_entry *a, struct nat_en
 static void purge_tcp_entry(zdtun_t *tun, struct nat_entry *entry, struct nat_entry *prev) {
   // Send TCP RST
   build_tcp_ip_header(tun, entry, TH_RST | TH_ACK, 0);
-  tun->recv_callback(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
+  tun->callbacks.send_client(tun, tun->reply_buf, MIN_TCP_HEADER_LEN + NAT_IP_HEADER_SIZE, tun->user_data);
 
   purge_nat_entry(tun, entry, &tun->tcp_nat_table, prev);
 }

@@ -172,16 +172,29 @@ typedef struct zdtun_statistics {
   u_int32_t num_open_sockets;           ///< number of opened sockets in zdtun
 } zdtun_statistics_t;
 
-/*
- * @brief a callback to send data to the client.
- *
- * @param tun the zdtun instance the packet comes from.
- * @param pkt_buf the buffer pointing to IP header and data.
- * @param pkt_size the total size of the IP packet.
- * @param udata user data parameter as registered in zdtun_init.
- * 
- */
-typedef int (*zdtun_send_client) (zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, void *udata);
+typedef struct zdtun_callbacks {
+  /*
+   * @brief (mandatory) Send data to the client.
+   *
+   * @param tun the zdtun instance the packet comes from.
+   * @param pkt_buf the buffer pointing to IP header and data.
+   * @param pkt_size the total size of the IP packet.
+   * @param udata user data parameter as registered in zdtun_init.
+   *
+   * @return 0 on success
+   */
+  int (*send_client) (zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, void *udata);
+
+  /*
+   * @brief Called whenever a new socket is opened.
+   */
+  void (*on_socket_open) (socket_t socket, void *udata);
+
+  /*
+   * @brief Called whenever a new socket is opened.
+   */
+  void (*on_socket_close) (socket_t socket, void *udata);
+} zdtun_callbacks_t;
 
 /*
  * @brief Inizialize a zdtun instance.
@@ -191,7 +204,7 @@ typedef int (*zdtun_send_client) (zdtun_t *tun, char *pkt_buf, ssize_t pkt_size,
  *
  * @return a zdtun_t instance on success, NULL on failure.
  */
-zdtun_t* zdtun_init(zdtun_send_client client_callback, void *udata);
+zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata);
 
 /*
  * @brief Finalize a zdtun instance.

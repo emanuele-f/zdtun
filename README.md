@@ -58,9 +58,12 @@ int send_pivot_callback(zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, void *uda
 int main() {
   /* A TCP socket connected to the client */
   socket_t cli_socket = ...;
+  zdtun_callbacks_t callbacks = {
+    .send_client = send_pivot_callback,
+  };
   ...
 
-  zdtun_t *tun = zdtun_init(send_pivot_callback, &cli_socket);
+  zdtun_t *tun = zdtun_init(&callbacks, &cli_socket);
 
   while(1) {
     int max_fd = 0;
@@ -72,6 +75,7 @@ int main() {
 
     /* Add client fd to the readable fds */
     FD_SET(cli_socket, &fdset);
+    max_fd = max(max_fd, cli_socket);
 
     /* Wait for socket events */
     select(max_fd + 1, &fdset, &wrfds, NULL, NULL);

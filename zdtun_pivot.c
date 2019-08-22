@@ -102,6 +102,9 @@ int main(int argc, char **argv) {
 
   zdtun_t *tun;
   socket_t sock;
+  zdtun_callbacks_t callbacks = {
+    .send_client = data_in,
+  };
 
   while(true) {
     struct sockaddr_in client_addr;
@@ -111,7 +114,7 @@ int main(int argc, char **argv) {
     log("Client connection: %s", ipv4str(client_addr.sin_addr.s_addr, buf1));
 
     time_t last_purge = time(NULL);
-    tun = zdtun_init(data_in, &sock);
+    tun = zdtun_init(&callbacks, &sock);
 
     if(!tun)
       exit(1);
