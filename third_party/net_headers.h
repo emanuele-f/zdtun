@@ -82,10 +82,11 @@ struct tcphdr
 #if defined(_LITTLE_ENDIAN)
   uint8_t th_x2:4;        /* (unused) */
   uint8_t th_off:4;       /* data offset */
-#endif
+#else
 #if defined(_BIG_ENDIAN)
   uint8_t th_off:4;       /* data offset */
   uint8_t th_x2:4;        /* (unused) */
+#endif
 #endif
   uint8_t th_flags;
 #define TH_FIN 0x01

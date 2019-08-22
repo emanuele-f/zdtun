@@ -5,12 +5,19 @@ project(C)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
-ADD_LIBRARY(zdtun STATIC zdtun.c utils.c)
-ADD_LIBRARY(zdtun_dbg STATIC zdtun.c utils.c)
-add_executable(zdtun_pivot zdtun_pivot.c)
-add_executable(zdtun_client zdtun_client.c utils.c)
+if(ANDROID)
+  ADD_LIBRARY(zdtun SHARED zdtun.c utils.c)
 
-TARGET_LINK_LIBRARIES(zdtun_pivot zdtun_dbg)
+  TARGET_LINK_LIBRARIES(zdtun)
+else
+  ADD_LIBRARY(zdtun STATIC zdtun.c utils.c)
+  ADD_LIBRARY(zdtun_dbg STATIC zdtun.c utils.c)
+
+  add_executable(zdtun_pivot zdtun_pivot.c)
+  add_executable(zdtun_client zdtun_client.c utils.c)
+  TARGET_LINK_LIBRARIES(zdtun_pivot zdtun_dbg)
+endif()
+
 set_target_properties(zdtun PROPERTIES COMPILE_FLAGS -DNO_DEBUG)
 
 if(WIN32)
@@ -19,7 +26,6 @@ if(WIN32)
 
   # assume LITTLE_ENDIAN on Windows
 else()
-  set(CMAKE_C_COMPILER gcc)
   set(CMAKE_C_FLAGS "-Wall -Wno-unused-variable -Wno-unused-function -g")
 
   include (TestBigEndian)
