@@ -9,7 +9,12 @@ if(ANDROID)
   ADD_LIBRARY(zdtun SHARED zdtun.c utils.c)
 
   TARGET_LINK_LIBRARIES(zdtun)
+  add_definitions(-DANDROID)
   add_definitions(-DZDTUN_SKIP_ICMP)
+
+  find_library(log-lib log)
+
+  TARGET_LINK_LIBRARIES(zdtun ${log-lib})
 else()
   ADD_LIBRARY(zdtun STATIC zdtun.c utils.c)
   ADD_LIBRARY(zdtun_dbg STATIC zdtun.c utils.c)
@@ -17,9 +22,9 @@ else()
   add_executable(zdtun_pivot zdtun_pivot.c)
   add_executable(zdtun_client zdtun_client.c utils.c)
   TARGET_LINK_LIBRARIES(zdtun_pivot zdtun_dbg)
-endif()
 
-set_target_properties(zdtun PROPERTIES COMPILE_FLAGS -DNO_DEBUG)
+  set_target_properties(zdtun PROPERTIES COMPILE_FLAGS -DNO_DEBUG)
+endif()
 
 if(WIN32)
   target_link_libraries(zdtun_pivot ws2_32)

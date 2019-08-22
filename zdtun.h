@@ -59,11 +59,25 @@
 #endif
 
 #ifndef NO_DEBUG
+
+#ifdef ANDROID
+#include <android/log.h>
+#define log(...) { __android_log_print(ANDROID_LOG_INFO, "zdtun", __VA_ARGS__); }
+#define error(...) { __android_log_print(ANDROID_LOG_ERROR, "zdtun", __VA_ARGS__); }
+#else
 #define log(...) { printf(__VA_ARGS__); fputc('\n', stdout); }
 #define error(...) { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); }
+#endif
+
 #else
+
+#ifndef log
 #define log(...) {}
+#endif
+#ifndef error
 #define error(...) {}
+#endif
+
 #endif
 
 #define fatal(...) { error(__VA_ARGS__); exit(1); }
