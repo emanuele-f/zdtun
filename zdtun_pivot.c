@@ -41,8 +41,8 @@
 
 /* ******************************************************* */
 
-static int data_in(zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, void *user_data) {
-  socket_t client_sock = *((socket_t *)user_data);
+static int data_in(zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, const zdtun_conn_t *conn_info) {
+  socket_t client_sock = *((socket_t *)zdtun_userdata(tun));
 
   con_send(client_sock, pkt_buf, pkt_size);
   return 0;
@@ -153,7 +153,7 @@ int main(int argc, char **argv) {
 
             debug("Got %u bytes from the client", size);
 
-            zdtun_forward(tun, buffer, size);
+            zdtun_forward(tun, buffer, size, NULL);
           } else
             zdtun_handle_fd(tun, &fdset, &wrfds);
         } else {

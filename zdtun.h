@@ -172,28 +172,63 @@ typedef struct zdtun_statistics {
   u_int32_t num_open_sockets;           ///< number of opened sockets in zdtun
 } zdtun_statistics_t;
 
+/*
+ * @brief a structure containing connection information in network byte order.
+ */
+typedef struct zdtun_con {
+  u_int8_t ipproto;
+  u_int32_t src_ip;
+  u_int32_t dst_ip;
+  u_int16_t src_port;
+  u_int16_t dst_port;
+  void *user_data;                      ///< points to user_data provided in on_connection_open
+} zdtun_conn_t;
+
 typedef struct zdtun_callbacks {
   /*
    * @brief (mandatory) Send data to the client.
    *
    * @param tun the zdtun instance the packet comes from.
+   * @param conn_info contains information about the connection
    * @param pkt_buf the buffer pointing to IP header and data.
    * @param pkt_size the total size of the IP packet.
-   * @param udata user data parameter as registered in zdtun_init.
    *
    * @return 0 on success
    */
-  int (*send_client) (zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, void *udata);
+  int (*send_client) (zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, const zdtun_conn_t *conn_info);
 
   /*
    * @brief Called whenever a new socket is opened.
+   * @param tun the zdtun instance
+   * @param socket the socket which has been opened
    */
-  void (*on_socket_open) (socket_t socket, void *udata);
+  void (*on_socket_open) (zdtun_t *tun, socket_t socket);
 
   /*
-   * @brief Called whenever a new socket is opened.
+   * @brief Called whenever a socket is being closed.
+   * @param tun the zdtun instance
+   * @param socket the socket which is being closed
    */
-  void (*on_socket_close) (socket_t socket, void *udata);
+  void (*on_socket_close) (zdtun_t *tun, socket_t socket);
+
+  /*
+   * @brief Called whenever a new connection is created.
+   *
+   * @param tun the zdtun instance
+   * @param conn_info information about the connection
+   * @param conn_data can be used to store arbitrary data into the connection (into the user_data field)
+   *
+   * @return 0 if the connection can be established, 1 to block it
+   */
+  int (*on_connection_open) (zdtun_t *tun, const zdtun_conn_t *conn_info, void **conn_data);
+
+  /*
+   * @brief Called whenever a connection is closed.
+   *
+   * @param tun the zdtun instance
+   * @param conn_info information about the connection. User provided user_data should be manually freed.
+   */
+  void (*on_connection_close) (zdtun_t *tun, const zdtun_conn_t *conn_info);
 } zdtun_callbacks_t;
 
 /*
@@ -205,6 +240,13 @@ typedef struct zdtun_callbacks {
  * @return a zdtun_t instance on success, NULL on failure.
  */
 zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata);
+
+/*
+ * @brief Retrieves user data passed in zdtun_init from a zdtun connection.
+ *
+ * @return (possibly NULL) user data
+ */
+void* zdtun_userdata(zdtun_t *tun);
 
 /*
  * @brief Finalize a zdtun instance.
@@ -255,9 +297,11 @@ void zdtun_get_stats(zdtun_t *tun, zdtun_statistics_t *stats);
  * @param tun a zdtun instance.
  * @param pkt_buf buffer pointing to IP header and data.
  * @param pkt_len total size of the IP packet.
+ * @param conn_info if not NULL, on a successful call the connection details will
+ * be copied to the provided structure
  *
  * @return 0 on success, error code otherwise.
  */
-int zdtun_forward(zdtun_t *tun, char *pkt_buf, size_t pkt_len);
+int zdtun_forward(zdtun_t *tun, char *pkt_buf, size_t pkt_len, zdtun_conn_t *conn_info);
 
 #endif
