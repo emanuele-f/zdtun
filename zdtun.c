@@ -1029,10 +1029,50 @@ static void purge_tcp_entry(zdtun_t *tun, struct nat_entry *entry, struct nat_en
 }
 
 void zdtun_purge_expired(zdtun_t *tun, time_t now) {
+  int max_purge = 0;
+  int forced_tcp_purge = 0;
+  int forced_udp_purge = 0;
+  int forced_icmp_purge = 0;
+  struct nat_entry *entry, *tmp, *prev;
+
+  if(now == 0) {
+    /* Purge all */
+    forced_tcp_purge = forced_udp_purge = forced_icmp_purge = 1;
+    max_purge = tun->num_open_socks;
+  }
+
   debug("zdtun_purge_expired called");
 
-  {
-    struct nat_entry *entry, *tmp, *prev = NULL;
+  /* TCP/UDP */
+  if(tun->num_open_socks >= MAX_NUM_SOCKETS) {
+    int num_opened_tcp, num_opened_udp;
+
+    LL_COUNT(tun->tcp_nat_table, entry, num_opened_tcp);
+    LL_COUNT(tun->udp_nat_table, entry, num_opened_udp);
+
+    if(num_opened_tcp > num_opened_udp) {
+      forced_tcp_purge = 1;
+      max_purge = tun->num_open_socks - NUM_SOCKETS_AFTER_PURGE;
+    } else {
+      forced_udp_purge = 1;
+      max_purge = tun->num_open_socks - NUM_SOCKETS_AFTER_PURGE;
+    }
+  }
+
+  /* ICMP */
+  if(forced_icmp_purge) {
+    /* Force purge */
+    LL_SORT(tun->icmp_nat_table, nat_entry_cmp_timestamp_asc);
+
+    LL_FOREACH_SAFE(tun->icmp_nat_table, entry, tmp) {
+      debug("FORCE ICMP PURGE");
+      purge_nat_entry(tun, entry, &tun->icmp_nat_table, NULL);
+
+      if(--max_purge <= 0)
+        break;
+    }
+  } else {
+    prev = NULL;
     LL_FOREACH_SAFE(tun->icmp_nat_table, entry, tmp) {
       if((now - entry->tstamp) >= ICMP_TIMEOUT_SEC) {
         debug("IDLE ICMP");
@@ -1042,22 +1082,6 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now) {
     }
   }
 
-  /* TCP/ICMP */
-  struct nat_entry *entry, *tmp, *prev;
-  int forced_tcp_purge = 0;
-  int forced_udp_purge = 0;
-
-  if(tun->num_open_socks >= MAX_NUM_SOCKETS) {
-    int num_opened_tcp, num_opened_udp;
-
-    LL_COUNT(tun->tcp_nat_table, entry, num_opened_tcp);
-    LL_COUNT(tun->udp_nat_table, entry, num_opened_udp);
-
-    if(num_opened_tcp > num_opened_udp)
-      forced_tcp_purge = tun->num_open_socks - NUM_SOCKETS_AFTER_PURGE;
-    else
-      forced_udp_purge = tun->num_open_socks - NUM_SOCKETS_AFTER_PURGE;
-  }
 
   /* TCP */
   if(forced_tcp_purge) {
@@ -1068,7 +1092,7 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now) {
       debug("FORCE TCP PURGE");
       purge_tcp_entry(tun, entry, NULL);
 
-      if(--forced_tcp_purge <= 0)
+      if(--max_purge <= 0)
         break;
     }
   } else {
@@ -1092,7 +1116,7 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now) {
       debug("FORCE UDP PURGE");
       purge_nat_entry(tun, entry, &tun->udp_nat_table, NULL);
 
-      if(--forced_udp_purge <= 0)
+      if(--max_purge <= 0)
         break;
     }
   } else {

@@ -73,6 +73,23 @@ static void print_zdtun_stats(zdtun_t *tun) {
 
 /* ******************************************************* */
 
+static bool running;
+
+#ifndef WIN32
+
+static void term_handler(int signo) {
+  if(running)
+    running = false;
+  else {
+    eprintf("Leaving now");
+    exit(0);
+  }
+}
+
+#endif
+
+/* ******************************************************* */
+
 int main(int argc, char **argv) {
 #ifdef WIN32
   WORD wVersionRequested;
@@ -87,6 +104,12 @@ int main(int argc, char **argv) {
     fatal("WSAStartup failed with error: %d\n", err);
 #else
   signal(SIGPIPE, SIG_IGN);
+#endif
+
+  running = true;
+
+#ifndef WIN32
+  signal(SIGINT, term_handler);
 #endif
 
   if(argc != 3)
@@ -119,7 +142,7 @@ int main(int argc, char **argv) {
     if(!tun)
       exit(1);
 
-    while(true) {
+    while(running) {
       bool do_purge = false;
 
       if((time(NULL) - last_purge) >= MAX_PURGE_SECS) {
@@ -142,7 +165,9 @@ int main(int argc, char **argv) {
 
         int ret = select(max_fd + 1, &fdset, &wrfds, NULL, &tv);
 
-        if(ret == SOCKET_ERROR) {
+        if(!running)
+          break;
+        else if(ret == SOCKET_ERROR) {
           fatal("Select error[%d]\n", socket_errno);
         } else if (ret > 0) {
           if(FD_ISSET(sock, &fdset)) {
