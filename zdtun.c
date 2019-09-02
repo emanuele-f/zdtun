@@ -123,7 +123,7 @@ static int close_socket(zdtun_t *tun, socket_t sock) {
 
 /* ******************************************************* */
 
-inline void* zdtun_userdata(zdtun_t *tun) {
+void* zdtun_userdata(zdtun_t *tun) {
   return(tun->user_data);
 }
 
