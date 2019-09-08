@@ -167,7 +167,9 @@ minimal communication.
 
 ## See Also
 
+- zdtun used on Android to capture packets: https://github.com/emanuele-f/RemoteCapture
 - RAW sockets for pivoting, no Windows support, no API: https://github.com/0x36/VPNPivot
 - https://docs.microsoft.com/en-us/windows/desktop/winsock/maximum-number-of-sockets-supported-2
 - http://tangentsoft.net/wskfaq/advanced.html#maxsockets
-- Reverse tethering on android devices, employing a similar tecnique: https://github.com/Genymobile/gnirehtet/blob/master/DEVELOP.md
+- Reverse tethering on Android devices, employing a similar tecnique: https://github.com/Genymobile/gnirehtet/blob/master/DEVELOP.md
+- Proxy-like implementation for an Android firewall: https://github.com/m66b/NetGuard
