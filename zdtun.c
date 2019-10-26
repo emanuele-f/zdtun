@@ -197,7 +197,12 @@ void ztdun_finalize(zdtun_t *tun) {
 /* ******************************************************* */
 
 static inline int send_to_client(zdtun_t *tun, const struct nat_entry *entry, size_t size) {
-  return tun->callbacks.send_client(tun, tun->reply_buf, size, &entry->conn);
+  int rv = tun->callbacks.send_client(tun, tun->reply_buf, size, &entry->conn);
+
+  if(tun->callbacks.account_packet)
+      tun->callbacks.account_packet(tun, tun->reply_buf, size, 0 /* from zdtun */, &entry->conn);
+
+  return(rv);
 }
 
 /* ******************************************************* */
@@ -489,6 +494,9 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len, zdtun_con
     if(conn_info)
       *conn_info = conn;
 
+    if(tun->callbacks.account_packet)
+      tun->callbacks.account_packet(tun, pkt_buf, pkt_len, 1 /* to zdtun */, &entry->conn);
+
 #ifndef WIN32
     tun->all_max_fd = max(tun->all_max_fd, tcp_sock);
 #endif
@@ -508,6 +516,9 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len, zdtun_con
 
   if(conn_info)
       *conn_info = entry->conn;
+
+  if(tun->callbacks.account_packet)
+     tun->callbacks.account_packet(tun, pkt_buf, pkt_len, 1 /* to zdtun */, &entry->conn);
 
   const size_t tcp_payload_size = pkt_len - ip_hdr_len - tcp_header_len;
 
@@ -623,6 +634,9 @@ static int handle_udp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len, zdtun_con
   if(conn_info)
     *conn_info = entry->conn;
 
+  if(tun->callbacks.account_packet)
+    tun->callbacks.account_packet(tun, pkt_buf, pkt_len, 1 /* to zdtun */, &entry->conn);
+
   struct sockaddr_in servaddr = {0};
   servaddr.sin_family = AF_INET;
   servaddr.sin_addr.s_addr = ip_header->daddr;
@@ -695,6 +709,9 @@ static int handle_icmp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len, zdtun_co
 
   if(conn_info)
     *conn_info = entry->conn;
+
+  if(tun->callbacks.account_packet)
+    tun->callbacks.account_packet(tun, pkt_buf, pkt_len, 1 /* to zdtun */, &entry->conn);
 
   struct sockaddr_in servaddr = {0};
   servaddr.sin_family = AF_INET;
@@ -1007,8 +1024,8 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
       prev = entry;
   }
 
-  if(!num_hits)
-    log("WARNING: no socket match!");
+  //if(!num_hits)
+    //log("WARNING: no socket match!");
 
   return num_hits;
 }

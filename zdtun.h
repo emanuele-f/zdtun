@@ -188,14 +188,25 @@ typedef struct zdtun_callbacks {
   /*
    * @brief (mandatory) Send data to the client.
    *
-   * @param tun the zdtun instance the packet comes from.
+   * @param tun the zdtun instance the packet comes from
+   * @param pkt_buf the buffer pointing to IP header and data
+   * @param pkt_size the total size of the IP packet
    * @param conn_info contains information about the connection
-   * @param pkt_buf the buffer pointing to IP header and data.
-   * @param pkt_size the total size of the IP packet.
    *
    * @return 0 on success
    */
   int (*send_client) (zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, const zdtun_conn_t *conn_info);
+
+  /*
+   * @brief A callback to easily account packets exchanged between the pivot and zdtun.
+   *
+   * @param tun the zdtun instance
+   * @param pkt_buf the buffer pointing to IP header and data
+   * @param pkt_size the total size of the IP packet
+   * @param to_zdtun 1 if the packet is generated from the pivot, false otherwise
+   * @param conn_info contains information about the connection
+   */
+  void (*account_packet) (zdtun_t *tun, const char *pkt_buf, ssize_t pkt_size, uint8_t to_zdtun, const zdtun_conn_t *conn_info);
 
   /*
    * @brief Called whenever a new socket is opened.
