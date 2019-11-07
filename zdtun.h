@@ -320,6 +320,15 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now);
 void zdtun_get_stats(zdtun_t *tun, zdtun_statistics_t *stats);
 
 /*
+ * Get the number of active connections
+ *
+ * @param tun a zdtun instance.
+ *
+ * @return the number of active connections
+ */
+int zdtun_get_num_connections(zdtun_t *tun);
+
+/*
  * Forward a client packet through the pivot.
  *
  * @param tun a zdtun instance.

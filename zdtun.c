@@ -1175,6 +1175,12 @@ int zdtun_iter_connections(zdtun_t *tun, zdtun_conn_iterator_t iterator, void *u
 
 /* ******************************************************* */
 
+int zdtun_get_num_connections(zdtun_t *tun) {
+    return(tun->num_open_socks);
+}
+
+/* ******************************************************* */
+
 void zdtun_get_stats(zdtun_t *tun, zdtun_statistics_t *stats) {
   struct nat_entry *icmp_entry;
   struct nat_entry *entry;
