@@ -184,6 +184,12 @@ typedef struct zdtun_con {
   void *user_data;                      ///< points to user_data provided in on_connection_open
 } zdtun_conn_t;
 
+/*
+ * @brief A connections iterator.
+ * @return 0 to continue iteration, != 0 to abort it.
+ */
+typedef int (*zdtun_conn_iterator_t)(zdtun_t *tun, const zdtun_conn_t *conn_info, void *userdata);
+
 typedef struct zdtun_callbacks {
   /*
    * @brief (mandatory) Send data to the client.
@@ -275,6 +281,17 @@ void ztdun_finalize(zdtun_t *tun);
  * @param wrfd will be filled with zdtun writable file descriptors.
  */
 void zdtun_fds(zdtun_t *tun, int *max_fd, fd_set *rdfd, fd_set *wrfd);
+
+/*
+ * @brief Iterate the active connections
+ *
+ * @param tun a zdtun instance.
+ * @param iterator the iterator to be called.
+ * @param userdata some arbitrary data to pass to the iterator.
+ *
+ * @return 0 if all the connections were iterated, 1 if the iterator aborted the iteration.
+ */
+int zdtun_iter_connections(zdtun_t *tun, zdtun_conn_iterator_t iterator, void *userdata);
 
 /*
  * @brief handle zdtun ready file descriptors. To be called after a select.

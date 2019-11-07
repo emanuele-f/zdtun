@@ -1152,6 +1152,29 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now) {
 
 /* ******************************************************* */
 
+int zdtun_iter_connections(zdtun_t *tun, zdtun_conn_iterator_t iterator, void *userdata) {
+  struct nat_entry *entry, *tmp, *prev;
+
+  LL_FOREACH_SAFE(tun->icmp_nat_table, entry, tmp) {
+    if(iterator(tun, &entry->conn, userdata) != 0)
+      return(1);
+  }
+
+  LL_FOREACH_SAFE(tun->tcp_nat_table, entry, tmp) {
+    if(iterator(tun, &entry->conn, userdata) != 0)
+      return(1);
+  }
+
+  LL_FOREACH_SAFE(tun->udp_nat_table, entry, tmp) {
+    if(iterator(tun, &entry->conn, userdata) != 0)
+      return(1);
+  }
+
+  return(0);
+}
+
+/* ******************************************************* */
+
 void zdtun_get_stats(zdtun_t *tun, zdtun_statistics_t *stats) {
   struct nat_entry *icmp_entry;
   struct nat_entry *entry;
