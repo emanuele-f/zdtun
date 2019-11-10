@@ -77,6 +77,7 @@ typedef struct zdtun_t {
   fd_set tcp_connecting;
   int all_max_fd;
   int num_open_socks;
+  int num_active_connections;
   u_int32_t num_icmp_opened;
   u_int32_t num_tcp_opened;
   u_int32_t num_udp_opened;
@@ -90,6 +91,23 @@ typedef struct zdtun_t {
   struct nat_entry *udp_nat_table;
   u_int32_t client_addr;
 } zdtun_t;
+
+/* ******************************************************* */
+
+struct dns_packet {
+    uint16_t transaction_id;
+    uint16_t flags;
+    uint16_t questions;
+    uint16_t answ_rrs;
+    uint16_t auth_rrs;
+    uint16_t additional_rrs;
+    uint8_t initial_dot; // just skip
+    uint8_t queries[];
+} __attribute__((packed));
+
+#define DNS_FLAGS_MASK 0x8000
+#define DNS_TYPE_REQUEST 0x0000
+#define DNS_TYPE_RESPONSE 0x8000
 
 /* ******************************************************* */
 
@@ -241,6 +259,8 @@ static void purge_nat_entry(zdtun_t *tun, struct nat_entry *entry,
 
   if(tun->callbacks.on_connection_close)
     tun->callbacks.on_connection_close(tun, &entry->conn);
+
+  tun->num_active_connections--;
 
   if(prev)
     prev->next = entry->next;
@@ -449,6 +469,7 @@ static int handle_tcp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len, zdtun_con
     }
 
     tun->num_tcp_opened++;
+    tun->num_active_connections++;
 
     // Setup for the connection
     struct sockaddr_in servaddr = {0};
@@ -620,6 +641,7 @@ static int handle_udp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len, zdtun_con
     tun->num_open_socks++;
 
     tun->num_udp_opened++;
+    tun->num_active_connections++;
     safe_alloc(entry, struct nat_entry);
     LL_PREPEND(tun->udp_nat_table, entry);
 
@@ -701,6 +723,7 @@ static int handle_icmp_nat(zdtun_t *tun, char *pkt_buf, size_t pkt_len, zdtun_co
     LL_PREPEND(tun->icmp_nat_table, entry);
 
     tun->num_icmp_opened++;
+    tun->num_active_connections++;
   }
 
   entry->tstamp = time(NULL);
@@ -895,6 +918,29 @@ static int handle_tcp_reply(zdtun_t *tun, struct nat_entry *entry, struct nat_en
 
 /* ******************************************************* */
 
+static int check_dns_purge(zdtun_t *tun, struct nat_entry *entry, struct nat_entry *prev,
+        char *l4_payload, uint16_t l4_len) {
+    struct dns_packet *dns;
+
+    if((l4_len < sizeof(struct dns_packet)) || (entry->conn.dst_port != ntohs(53)))
+        return(1);
+
+    dns = (struct dns_packet*)l4_payload;
+
+    if((dns->flags & DNS_FLAGS_MASK) == DNS_TYPE_RESPONSE) {
+        /* DNS response received, can now purge the entry */
+        debug("DNS purge");
+        purge_nat_entry(tun, entry, &tun->udp_nat_table, prev);
+
+        /* purged */
+        return(0);
+    }
+
+    return(1);
+}
+
+/* ******************************************************* */
+
 // return 0 if the entry was removed
 static int handle_udp_reply(zdtun_t *tun, struct nat_entry *entry, struct nat_entry *prev) {
   char *payload_ptr = tun->reply_buf + NAT_IP_HEADER_SIZE + sizeof(struct udphdr);
@@ -943,7 +989,8 @@ static int handle_udp_reply(zdtun_t *tun, struct nat_entry *entry, struct nat_en
 
   // ok
   entry->tstamp = time(NULL);
-  return 1;
+
+  return check_dns_purge(tun, entry, prev, payload_ptr, l4_len);
 }
 
 /* ******************************************************* */
@@ -1176,7 +1223,7 @@ int zdtun_iter_connections(zdtun_t *tun, zdtun_conn_iterator_t iterator, void *u
 /* ******************************************************* */
 
 int zdtun_get_num_connections(zdtun_t *tun) {
-    return(tun->num_open_socks);
+    return(tun->num_active_connections);
 }
 
 /* ******************************************************* */
