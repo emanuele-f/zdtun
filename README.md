@@ -83,7 +83,7 @@ int main() {
     if(FD_ISSET(cli_socket, &fdset)) {
       /* Got data from the client, forward it to the private network */
       size = recv(cli_socket, buffer, sizeof(buffer), 0);
-      zdtun_forward(tun, buffer, size, NULL);
+      zdtun_easy_forward(tun, buffer, size);
     } else {
       /* let zdtun handle it */
       zdtun_handle_fd(tun, &fdset, &wrfds);

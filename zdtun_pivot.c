@@ -62,12 +62,12 @@ static void print_zdtun_stats(zdtun_t *tun) {
   eprintf("  tot_tcp_opened: %u\n", stats->num_tcp_opened);
   eprintf("  tot_udp_opened: %u\n\n", stats->num_udp_opened);
   eprintf("  num_open_sockets: %u\n", stats->num_open_sockets);
-  eprintf("  num_icmp_entries: %u\n", stats->num_icmp_entries);
-  eprintf("  num_tcp_entries: %u\n", stats->num_tcp_entries);
-  eprintf("  num_udp_entries: %u\n\n", stats->num_udp_entries);
-  eprintf("  oldest_icmp_entry: %lu sec ago\n", (stats->oldest_icmp_entry) ? (now - stats->oldest_icmp_entry) : 0);
-  eprintf("  oldest_tcp_entry: %lu sec ago\n", (stats->oldest_tcp_entry) ? (now - stats->oldest_tcp_entry) : 0);
-  eprintf("  oldest_udp_entry: %lu sec ago\n", (stats->oldest_udp_entry) ? (now - stats->oldest_udp_entry) : 0);
+  eprintf("  num_icmp_conn: %u\n", stats->num_icmp_conn);
+  eprintf("  num_tcp_conn: %u\n", stats->num_tcp_conn);
+  eprintf("  num_udp_conn: %u\n\n", stats->num_udp_conn);
+  eprintf("  oldest_icmp_conn: %lu sec ago\n", (stats->oldest_icmp_conn) ? (now - stats->oldest_icmp_conn) : 0);
+  eprintf("  oldest_tcp_conn: %lu sec ago\n", (stats->oldest_tcp_conn) ? (now - stats->oldest_tcp_conn) : 0);
+  eprintf("  oldest_udp_conn: %lu sec ago\n", (stats->oldest_udp_conn) ? (now - stats->oldest_udp_conn) : 0);
   eprintf("********************\n\n");
 }
 
@@ -78,9 +78,10 @@ static bool running;
 #ifndef WIN32
 
 static void term_handler(int signo) {
-  if(running)
+  if(running) {
+    eprintf("Shutting down...");
     running = false;
-  else {
+  } else {
     eprintf("Leaving now");
     exit(0);
   }
@@ -178,7 +179,8 @@ int main(int argc, char **argv) {
 
             debug("Got %u bytes from the client", size);
 
-            zdtun_forward(tun, buffer, size, NULL);
+            if(!zdtun_easy_forward(tun, buffer, size))
+              error("zdtun_easy_forward failed");
           } else
             zdtun_handle_fd(tun, &fdset, &wrfds);
         } else {

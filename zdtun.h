@@ -157,32 +157,73 @@ typedef struct zdtun_t zdtun_t;
  * @brief a structure containing zdtun statistics.
  */
 typedef struct zdtun_statistics {
-  u_int16_t num_icmp_entries;           ///< current number of active ICMP connections
-  u_int16_t num_tcp_entries;            ///< current number of active TCP connections
-  u_int16_t num_udp_entries;            ///< current number of active UDP connections
+  u_int16_t num_icmp_conn;              ///< current number of active ICMP connections
+  u_int16_t num_tcp_conn;               ///< current number of active TCP connections
+  u_int16_t num_udp_conn;               ///< current number of active UDP connections
 
   u_int32_t num_icmp_opened;            ///< total number of ICMP connections (since zdtun_init)
   u_int32_t num_tcp_opened;             ///< total number of TCP connections (since zdtun_init)
   u_int32_t num_udp_opened;             ///< total number of UDP connections (since zdtun_init)
 
-  time_t oldest_icmp_entry;             ///< timestamp of the oldest active ICMP connection
-  time_t oldest_tcp_entry;              ///< timestamp of the oldest active TCP connection
-  time_t oldest_udp_entry;              ///< timestamp of the oldest active UDP connection
+  time_t oldest_icmp_conn;              ///< timestamp of the oldest active ICMP connection
+  time_t oldest_tcp_conn;               ///< timestamp of the oldest active TCP connection
+  time_t oldest_udp_conn;               ///< timestamp of the oldest active UDP connection
 
   u_int32_t num_open_sockets;           ///< number of opened sockets in zdtun
 } zdtun_statistics_t;
 
-/*
- * @brief a structure containing connection information in network byte order.
- */
-typedef struct zdtun_con {
+typedef struct zdtun_5tuple {
   u_int8_t ipproto;
   u_int32_t src_ip;
   u_int32_t dst_ip;
-  u_int16_t src_port;
-  u_int16_t dst_port;
-  void *user_data;                      ///< points to user_data provided in on_connection_open
-} zdtun_conn_t;
+
+  union {
+    u_int16_t src_port;
+    u_int16_t echo_id;
+  };
+
+  union {
+    u_int16_t dst_port;
+    u_int16_t echo_seq;
+  };
+} zdtun_5tuple_t;
+
+/*
+ * @brief represents a connection in zdtun
+ */
+typedef struct zdtun_conn zdtun_conn_t;
+
+/*
+ * @brief a container for a packet metadata.
+ */
+typedef struct zdtun_pkt {
+  zdtun_5tuple_t tuple;
+
+  u_int16_t pkt_len;
+  u_int16_t ip_hdr_len;
+  u_int16_t l4_hdr_len;
+  u_int16_t l7_len;
+
+  /* Packet buffer */
+  char *buf;
+
+  /* L3 pointers */
+  union {
+    char *l3;
+    struct iphdr *ip;
+  };
+
+  /* L4 pointers */
+  union {
+    char *l4;
+    struct tcphdr *tcp;
+    struct udphdr *udp;
+    struct icmphdr *icmp;
+  };
+
+  /* L7 pointer */
+  char *l7;
+} zdtun_pkt_t;
 
 /*
  * @brief A connections iterator.
@@ -233,11 +274,10 @@ typedef struct zdtun_callbacks {
    *
    * @param tun the zdtun instance
    * @param conn_info information about the connection
-   * @param conn_data can be used to store arbitrary data into the connection (into the user_data field)
    *
    * @return 0 if the connection can be established, 1 to block it
    */
-  int (*on_connection_open) (zdtun_t *tun, const zdtun_conn_t *conn_info, void **conn_data);
+  int (*on_connection_open) (zdtun_t *tun, const zdtun_conn_t *conn_info);
 
   /*
    * @brief Called whenever a connection is closed.
@@ -257,6 +297,8 @@ typedef struct zdtun_callbacks {
  * @return a zdtun_t instance on success, NULL on failure.
  */
 zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata);
+
+void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn);
 
 /*
  * @brief Retrieves user data passed in zdtun_init from a zdtun connection.
@@ -329,16 +371,69 @@ void zdtun_get_stats(zdtun_t *tun, zdtun_statistics_t *stats);
 int zdtun_get_num_connections(zdtun_t *tun);
 
 /*
+ * Parse a packet and populate the zdtun_pkt_t structure with its metadata.
+ *
+ * @param pkt_buf buffer pointing to IP header and data.
+ * @param pkt_len total size of the IP packet.
+ * @param pinfo pointer to the output structure.
+ *
+ * @return 0 on success, error code otherwise.
+ */
+int zdtun_parse_pkt(const char *pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pinfo);
+
+/*
  * Forward a client packet through the pivot.
  *
  * @param tun a zdtun instance.
  * @param pkt_buf buffer pointing to IP header and data.
  * @param pkt_len total size of the IP packet.
- * @param conn_info if not NULL, on a successful call the connection details will
- * be copied to the provided structure
  *
- * @return 0 on success, error code otherwise.
+ * @return zdtun_conn_t instance on success, NULL on failure.
  */
-int zdtun_forward(zdtun_t *tun, char *pkt_buf, size_t pkt_len, zdtun_conn_t *conn_info);
+zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, size_t pkt_len);
+
+/*
+ * Forward a client packet through the pivot.
+ *
+ * @param tun a zdtun instance.
+ * @param pkt the packet to forward.
+ * @param conn the connection, obtained by calling zdtun_lookup.
+ *
+ * @return 0 on success, errcode otherwise.
+ */
+int zdtun_forward(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn);
+
+/*
+ * Send a client packet containing out of band data through the pivot.
+ *
+ * This can be used to inject additional data, not present in the
+ * original TCP communication, without breaking the original TCP stream.
+ * The client won't know anything about this data, only the TCP receiver
+ * will.
+ *
+ * @param tun a zdtun instance.
+ * @param pkt the oob data to send.
+ * @param conn the connection, obtained by calling zdtun_lookup.
+ *
+ * @return 0 on success, errcode otherwise.
+ */
+int zdtun_send_oob(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn);
+
+/*
+ * Look up a flow or create it if it's not found.
+ *
+ * @param tun a zdtun instance.
+ * @param tuple the connection 5-tuple.
+ * @create 1 if a new connection should be created if not found, 0 otherwise.
+ *
+ * @return zdtun_conn_t instance on success, NULL on failure.
+ */
+zdtun_conn_t* zdtun_lookup(zdtun_t *tun, const zdtun_5tuple_t *tuple, uint8_t create);
+
+/* Connection methods */
+void* zdtun_conn_get_userdata(const zdtun_conn_t *conn);
+void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata);
+int zdtun_conn_dnat(zdtun_conn_t *conn, uint32_t dest_ip, uint16_t dest_port);
+const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
 
 #endif
