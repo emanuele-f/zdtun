@@ -277,7 +277,7 @@ typedef struct zdtun_callbacks {
    *
    * @return 0 if the connection can be established, 1 to block it
    */
-  int (*on_connection_open) (zdtun_t *tun, const zdtun_conn_t *conn_info);
+  int (*on_connection_open) (zdtun_t *tun, zdtun_conn_t *conn_info);
 
   /*
    * @brief Called whenever a connection is closed.
