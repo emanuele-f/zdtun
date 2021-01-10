@@ -39,16 +39,7 @@
 #include "zdtun.h"
 #include "utils.h"
 
-//#define ENABLE_LOCAL_TEST
-
 #define TUN1_DEV "tun10"
-
-#ifdef ENABLE_LOCAL_TEST
-#define TUN1_IP "10.30.10.1" // NOTE: ping 10.30.10.2
-#define TUN2_DEV "tun32"
-#define TUN2_IP "10.30.11.2"
-#define NETMASK "255.255.255.0"
-#endif
 
 #define TUN_MTU 1500
 #define PACKET_BUFSIZE 65535
@@ -122,11 +113,6 @@ static void send_server(char *pkt_buf, u_int32_t pkt_size) {
       return;
   }
 
-#ifdef ENABLE_LOCAL_TEST
-  /* Conversion for test: 10.30.10.2 -> 10.30.11.2 */
-  ip_header->daddr = htonl((ntohl(ip_header->daddr) | 0x100));
-#endif
-
   con_send(server_sock, pkt_buf, pkt_size);
 }
 
@@ -140,27 +126,6 @@ static void recv_server(char *buffer) {
 
   debug("Got %u bytes from the server", size);
 
-#ifdef ENABLE_LOCAL_TEST
-  struct iphdr *ip_header = (struct iphdr*) buffer;
-
-  /* Conversion for test: 10.30.11.2 -> 10.30.10.2 */
-  ip_header->saddr = htonl((ntohl(ip_header->saddr) & (~0x100)));
-
-  // Fix the checsums
-  if(ip_header->protocol == IPPROTO_TCP) {
-    struct tcphdr *tcp_header = (struct tcphdr *) &buffer[20];
-    tcp_header->check = 0;
-    tcp_header->check = tcp_checksum(tcp_header, ntohs(ip_header->tot_len) - ZDTUN_IP_HEADER_SIZE, ip_header->saddr, ip_header->daddr);
-  } else if(ip_header->protocol == IPPROTO_UDP) {
-    // remove the checsum for now
-    struct udphdr *udp_header = (struct udphdr *) &buffer[20];
-    udp_header->check = 0;
-  }
-
-  ip_header->check = 0;
-  ip_header->check = ip_checksum(buffer, ZDTUN_IP_HEADER_SIZE);
-#endif
-
   write(tun1_fd, buffer, size);
 }
 
@@ -170,24 +135,14 @@ int main(int argc, char **argv) {
   char *pkt_buf;
   int max_fd = 0;
 
-#ifndef ENABLE_LOCAL_TEST
   if(argc != 5)
     fatal("Usage: %s [-l port|ip port] tun_ip tun_netmask", argv[0]);
-#else
-  if(argc != 3)
-    fatal("Usage: %s [-l port|ip port]", argv[0]);
-#endif
 
   con_mode_info info;
   con_parse_args(argv, &info);
 
-#ifndef ENABLE_LOCAL_TEST
   const char *tun_ip = argv[3];
   const char *tun_netmask = argv[4];
-#else
-  const char *tun_ip = TUN1_IP;
-  const char *tun_netmask = NETMASK;
-#endif
 
   pkt_buf = (char *) malloc(PACKET_BUFSIZE);
 
@@ -199,10 +154,6 @@ int main(int argc, char **argv) {
   struct sockaddr_in tun_addr;
   inet_pton(AF_INET, tun_ip, &(tun_addr.sin_addr));
   tun_ip_addr = tun_addr.sin_addr.s_addr;
-
-#ifdef ENABLE_LOCAL_TEST
-  tun2_fd = open_tun(TUN2_DEV, TUN2_IP, NETMASK);
-#endif
 
   while(1) {
     struct sockaddr_in server_addr;

@@ -724,7 +724,7 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
   char buf1[INET_ADDRSTRLEN], buf2[INET_ADDRSTRLEN];
   const uint16_t icmp_len = pkt->l4_hdr_len + pkt->l7_len;
 
-  debug("[ICMP]-> %s -> %s", ipv4str(conn->tuple.src_ip, buf1),
+  debug("[ICMP.fw]-> %s -> %s", ipv4str(conn->tuple.src_ip, buf1),
     ipv4str(conn->tuple.dst_ip, buf2));
   debug("ICMP[len=%u] id=%d type=%d code=%d", icmp_len, data->un.echo.id, data->type, data->code);
 
@@ -863,16 +863,16 @@ static int handle_icmp_reply(zdtun_t *tun) {
     return 0;
   }
 
+  log_packet("[ICMP.re] %s -> %s", ipv4str(pinfo.tuple.src_ip, buf1), ipv4str(pinfo.tuple.dst_ip, buf2));
+  debug("ICMP[len=%lu] id=%d type=%d code=%d", icmp_len, data->un.echo.id, data->type, data->code);
+
   zdtun_conn_t *conn;
   HASH_FIND(hh, tun->conn_table, &pinfo.tuple, sizeof(pinfo.tuple), conn);
 
   if(!conn || (conn->icmp.echo_seq != data->un.echo.sequence)) {
-    log_packet("Discarding out of sequence ICMP[%d]", ntohs(data->un.echo.id));
+    log_packet("Discarding missing/out of sequence ICMP[%d]", ntohs(data->un.echo.id));
     return 0;
   }
-
-  log_packet("[ICMP] %s -> %s", ipv4str(conn->tuple.dst_ip, buf1), ipv4str(conn->tuple.src_ip, buf2));
-  debug("ICMP[len=%lu] id=%d type=%d code=%d", icmp_len, data->un.echo.id, data->type, data->code);
 
   // update the conn for next iterations
   conn->tstamp = time(NULL);
