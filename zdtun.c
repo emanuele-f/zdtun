@@ -856,21 +856,28 @@ static int handle_icmp_reply(zdtun_t *tun) {
     return 0;
   }
 
-  zdtun_pkt_t pinfo;
-
-  if(zdtun_parse_pkt(payload_ptr, l3_len, &pinfo) != 0) {
-    debug("parse_pkt ICMP failed");
-    return 0;
-  }
-
-  log_packet("[ICMP.re] %s -> %s", ipv4str(pinfo.tuple.src_ip, buf1), ipv4str(pinfo.tuple.dst_ip, buf2));
+  log_packet("[ICMP.re] %s -> %s", ipv4str(ip_header->saddr, buf1), ipv4str(ip_header->daddr, buf2));
   debug("ICMP[len=%lu] id=%d type=%d code=%d", icmp_len, data->un.echo.id, data->type, data->code);
 
-  zdtun_conn_t *conn;
-  HASH_FIND(hh, tun->conn_table, &pinfo.tuple, sizeof(pinfo.tuple), conn);
+  zdtun_conn_t *conn = NULL;
+  zdtun_conn_t *cur, *tmp;
 
-  if(!conn || (conn->icmp.echo_seq != data->un.echo.sequence)) {
-    log_packet("Discarding missing/out of sequence ICMP[%d]", ntohs(data->un.echo.id));
+  // Need to manually search the connection as the packet destination
+  // is unknown (it corresponds to one of the pivot interfaces souce addresses)
+  HASH_ITER(hh, tun->conn_table, cur, tmp) {
+    if((cur->tuple.ipproto == IPPROTO_ICMP)
+        && (cur->tuple.dst_ip == ip_header->saddr)
+        && (cur->tuple.echo_id == data->un.echo.id)) {
+      conn = cur;
+      break;
+    }
+
+    if(cur->tuple.ipproto == IPPROTO_ICMP)
+      printf("%d VS %d\n", cur->tuple.echo_id, data->un.echo.id);
+  }
+
+  if(!conn) {
+    log_packet("ICMP not found");
     return 0;
   }
 
