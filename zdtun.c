@@ -35,10 +35,15 @@
 #define UDP_TIMEOUT_SEC 30
 #define TCP_TIMEOUT_SEC 60
 
-// 64 is the per-thread limit on Winsocks
-// use a lower value to leave room for user defined connections
-#define MAX_NUM_SOCKETS 55
-#define NUM_SOCKETS_AFTER_PURGE 40
+#ifdef WIN32
+  // 64 is the per-thread limit on Winsocks
+  // use a lower value to leave room for user defined connections
+  #define MAX_NUM_SOCKETS 55
+  #define NUM_SOCKETS_AFTER_PURGE 40
+#else
+  #define MAX_NUM_SOCKETS 128
+  #define NUM_SOCKETS_AFTER_PURGE 96
+#endif
 
 /* ******************************************************* */
 
@@ -340,8 +345,6 @@ static inline void build_tcp_ip_header(zdtun_t *tun, zdtun_conn_t *conn, u_int8_
 // will be (later) destroyed by zdtun_purge_expired.
 // May be called multiple times.
 static void close_conn(zdtun_t *tun, zdtun_conn_t *conn) {
-  conn->status = CONN_STATUS_CLOSED;
-
   if(conn->sock != INVALID_SOCKET)
     finalize_zdtun_sock(tun, conn);
 
@@ -351,8 +354,18 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn) {
     conn->tcp.pending = NULL;
   }
 
+  if((conn->tuple.ipproto == IPPROTO_TCP)
+      && (conn->status != CONN_STATUS_CLOSED)
+      && !conn->tcp.fin_ack_sent) {
+    // Send TCP RST
+    build_tcp_ip_header(tun, conn, TH_RST | TH_ACK, 0);
+    send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
+  }
+
   if(tun->callbacks.on_connection_close)
     tun->callbacks.on_connection_close(tun, conn);
+
+  conn->status = CONN_STATUS_CLOSED;
 }
 
 /* ******************************************************* */
@@ -361,12 +374,6 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn) {
 // generate dangling pointers. Use close_conn instead.
 void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
   debug("PURGE SOCKET (type=%d)", conn->tuple.ipproto);
-
-  if(conn->tuple.ipproto == IPPROTO_TCP) {
-    // Send TCP RST
-    build_tcp_ip_header(tun, conn, TH_RST | TH_ACK, 0);
-    send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
-  }
 
   close_conn(tun, conn);
 
@@ -777,6 +784,11 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
 
 static int zdtun_forward_full(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn, uint8_t no_hack) {
   int rv = 0;
+
+  if(conn->status == CONN_STATUS_CLOSED) {
+    debug("Refusing to forward closed connection");
+    return 0;
+  }
 
   switch(pkt->tuple.ipproto) {
     case IPPROTO_TCP:
