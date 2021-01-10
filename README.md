@@ -24,7 +24,7 @@ Zero Dep Tunnel offers the following features:
   - Supports running some nmap scans through the tunnel
   - Supports internet traffic tunneling via a default gateway on the pivot host network
 
-## Naming an Assumptions
+## Naming and Assumptions
 
 Some naming conventions:
   - Client host: the host which is willing to reach the remote private network
@@ -35,11 +35,6 @@ Assumptions:
   - Zero Dep Tunnel requires an enstablished TCP-like connection between the client host
     and the pivot host. It won't work on a UDP connection.
   - The client host is a Linux pc with TUN interface support.
-  - Only one client IP address at a time is using the pivot connection.
-
-The last assumption implies that, if you want to route multiple devices via a single
-pivot host connection, you will need to masquerade the devices IP addresses with the client
-IP.
 
 ## Sample Integration
 
@@ -167,7 +162,7 @@ minimal communication.
 
 ## See Also
 
-- zdtun used on Android to capture packets: https://github.com/emanuele-f/RemoteCapture
+- zdtun used on Android to capture packets: https://github.com/emanuele-f/PCAPdroid
 - RAW sockets for pivoting, no Windows support, no API: https://github.com/0x36/VPNPivot
 - https://docs.microsoft.com/en-us/windows/desktop/winsock/maximum-number-of-sockets-supported-2
 - http://tangentsoft.net/wskfaq/advanced.html#maxsockets

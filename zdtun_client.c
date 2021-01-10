@@ -150,7 +150,7 @@ static void recv_server(char *buffer) {
   if(ip_header->protocol == IPPROTO_TCP) {
     struct tcphdr *tcp_header = (struct tcphdr *) &buffer[20];
     tcp_header->check = 0;
-    tcp_header->check = tcp_checksum(tcp_header, ntohs(ip_header->tot_len) - NAT_IP_HEADER_SIZE, ip_header->saddr, ip_header->daddr);
+    tcp_header->check = tcp_checksum(tcp_header, ntohs(ip_header->tot_len) - ZDTUN_IP_HEADER_SIZE, ip_header->saddr, ip_header->daddr);
   } else if(ip_header->protocol == IPPROTO_UDP) {
     // remove the checsum for now
     struct udphdr *udp_header = (struct udphdr *) &buffer[20];
@@ -158,7 +158,7 @@ static void recv_server(char *buffer) {
   }
 
   ip_header->check = 0;
-  ip_header->check = ip_checksum(buffer, NAT_IP_HEADER_SIZE);
+  ip_header->check = ip_checksum(buffer, ZDTUN_IP_HEADER_SIZE);
 #endif
 
   write(tun1_fd, buffer, size);

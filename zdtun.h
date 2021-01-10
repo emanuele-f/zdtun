@@ -34,8 +34,8 @@
 /* ********************************* */
 
 /* DEBUG OPTIONS */
-//#define SHOW_DEBUG
-//#define SHOW_PACKETS_LOG
+#define SHOW_DEBUG
+#define SHOW_PACKETS_LOG
 //#define SHOW_TCP_WINDOW_LOG
 
 /* ********************************* */
@@ -82,7 +82,7 @@
 
 #define fatal(...) { error(__VA_ARGS__); exit(1); }
 
-#define NAT_IP_HEADER_SIZE 20
+#define ZDTUN_IP_HEADER_SIZE 20
 
 #ifdef WIN32
 #include <stdint.h>
@@ -172,8 +172,8 @@ typedef struct zdtun_statistics {
   u_int32_t num_open_sockets;           ///< number of opened sockets in zdtun
 } zdtun_statistics_t;
 
-typedef struct zdtun_5tuple {
-  u_int8_t ipproto;
+// packed - to be used with uthash
+typedef PACK_ON struct zdtun_5tuple {
   u_int32_t src_ip;
   u_int32_t dst_ip;
 
@@ -186,7 +186,9 @@ typedef struct zdtun_5tuple {
     u_int16_t dst_port;
     u_int16_t echo_seq;
   };
-} zdtun_5tuple_t;
+
+  u_int8_t ipproto;
+} PACK_OFF zdtun_5tuple_t;
 
 /*
  * @brief represents a connection in zdtun
