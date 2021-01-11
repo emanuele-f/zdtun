@@ -259,7 +259,7 @@ void ztdun_finalize(zdtun_t *tun) {
 
 /* ******************************************************* */
 
-static inline int send_to_client(zdtun_t *tun, const zdtun_conn_t *conn, size_t size) {
+static inline int send_to_client(zdtun_t *tun, const zdtun_conn_t *conn, int size) {
   int rv = tun->callbacks.send_client(tun, tun->reply_buf, size, conn);
 
   if(tun->callbacks.account_packet)
@@ -834,7 +834,7 @@ int zdtun_send_oob(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
-zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, size_t pkt_len) {
+zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, int pkt_len) {
   zdtun_pkt_t pkt;
 
   if(zdtun_parse_pkt(pkt_buf, pkt_len, &pkt) != 0) {
@@ -874,19 +874,19 @@ zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, size_t pkt_l
 
 static int handle_icmp_reply(zdtun_t *tun) {
   char *payload_ptr = tun->reply_buf;
-  ssize_t l3_len = recv(tun->icmp_socket, payload_ptr, REPLY_BUF_SIZE, 0);
+  int l3_len = recv(tun->icmp_socket, payload_ptr, REPLY_BUF_SIZE, 0);
 
   if(l3_len == SOCKET_ERROR) {
-    error("Error reading ICMP packet[%ld]: %d", l3_len, socket_errno);
+    error("Error reading ICMP packet[%d]: %d", l3_len, socket_errno);
     return -1;
   }
 
   struct iphdr *ip_header = (struct iphdr*)payload_ptr;
   int ip_header_size = ip_header->ihl * 4;
-  ssize_t icmp_len = l3_len - ip_header_size;
+  int icmp_len = l3_len - ip_header_size;
 
   if(icmp_len < sizeof(struct icmphdr)) {
-    error("ICMP packet too small[%ld]", icmp_len);
+    error("ICMP packet too small[%d]", icmp_len);
     return -1;
   }
 
@@ -899,7 +899,7 @@ static int handle_icmp_reply(zdtun_t *tun) {
   }
 
   log_packet("[ICMP.re] %s -> %s", ipv4str(ip_header->saddr, buf1), ipv4str(ip_header->daddr, buf2));
-  debug("ICMP[len=%lu] id=%d type=%d code=%d", icmp_len, data->un.echo.id, data->type, data->code);
+  debug("ICMP[len=%d] id=%d type=%d code=%d", icmp_len, data->un.echo.id, data->type, data->code);
 
   zdtun_conn_t *conn = NULL;
   zdtun_conn_t *cur, *tmp;
@@ -941,7 +941,7 @@ static int handle_icmp_reply(zdtun_t *tun) {
 
 static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   char *payload_ptr = tun->reply_buf + ZDTUN_IP_HEADER_SIZE + MIN_TCP_HEADER_LEN;
-  ssize_t l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE - ZDTUN_IP_HEADER_SIZE - MIN_TCP_HEADER_LEN, 0);
+  int l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE - ZDTUN_IP_HEADER_SIZE - MIN_TCP_HEADER_LEN, 0);
 
   conn->tstamp = time(NULL);
 
@@ -953,6 +953,9 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
       rv = 0;
     } else if(socket_errno == socket_con_reset) {
       debug("TCP connection reset");
+      rv = 0;
+    } else if(socket_errno == socket_con_aborted) {
+      debug("TCP connection aborted");
       rv = 0;
     } else {
       error("Error reading TCP packet[%d]", socket_errno);
@@ -1042,16 +1045,16 @@ static int check_dns_purge(zdtun_t *tun, zdtun_conn_t *conn,
 
 static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   char *payload_ptr = tun->reply_buf + ZDTUN_IP_HEADER_SIZE + sizeof(struct udphdr);
-  ssize_t l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE-ZDTUN_IP_HEADER_SIZE-sizeof(struct udphdr), 0);
+  int l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE-ZDTUN_IP_HEADER_SIZE-sizeof(struct udphdr), 0);
 
   if(l4_len == SOCKET_ERROR) {
-    error("Error reading UDP packet[%ld]: %d", l4_len, socket_errno);
+    error("Error reading UDP packet[%d]: %d", l4_len, socket_errno);
     close_conn(tun, conn);
     return -1;
   }
 
   // Reconstruct the UDP header
-  ssize_t l3_len = l4_len + sizeof(struct udphdr);
+  int l3_len = l4_len + sizeof(struct udphdr);
   struct udphdr *data = (struct udphdr*) (tun->reply_buf + ZDTUN_IP_HEADER_SIZE);
   data->uh_ulen = htons(l3_len);
   data->uh_sport = conn->tuple.dst_port;
@@ -1218,8 +1221,12 @@ int zdtun_iter_connections(zdtun_t *tun, zdtun_conn_iterator_t iterator, void *u
   zdtun_conn_t *conn, *tmp;
 
   HASH_ITER(hh, tun->conn_table, conn, tmp) {
-    if(iterator(tun, conn, userdata) != 0)
-      return(1);
+    // Do not iterate closed connections. User may have already free some data in
+    // on_connection_close so this may lead to invalid memory access.
+    if(conn->status != CONN_STATUS_CLOSED) {
+      if(iterator(tun, conn, userdata) != 0)
+        return(1);
+    }
   }
 
   return(0);

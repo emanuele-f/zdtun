@@ -92,7 +92,6 @@ typedef uint16_t u_int16_t;
 typedef uint32_t u_int32_t;
 
 typedef unsigned int uint;
-typedef int ssize_t;
 
 #else
 
@@ -113,6 +112,7 @@ typedef SOCKET socket_t;
 #define socket_in_progress (WSAEWOULDBLOCK)
 #define socket_con_refused (WSAECONNREFUSED)
 #define socket_con_reset (WSAECONNRESET)
+#define socket_con_aborted (WSAECONNABORTED)
 
 #else
 
@@ -123,6 +123,7 @@ typedef SOCKET socket_t;
 #define socket_in_progress (EINPROGRESS)
 #define socket_con_refused (ECONNREFUSED)
 #define socket_con_reset (ECONNRESET)
+#define socket_con_aborted (ECONNABORTED)
 typedef int socket_t;
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
@@ -246,7 +247,7 @@ typedef struct zdtun_callbacks {
    *
    * @return 0 on success
    */
-  int (*send_client) (zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, const zdtun_conn_t *conn_info);
+  int (*send_client) (zdtun_t *tun, char *pkt_buf, int pkt_size, const zdtun_conn_t *conn_info);
 
   /*
    * @brief A callback to easily account packets exchanged between the pivot and zdtun.
@@ -257,7 +258,7 @@ typedef struct zdtun_callbacks {
    * @param to_zdtun 1 if the packet is generated from the pivot, false otherwise
    * @param conn_info contains information about the connection
    */
-  void (*account_packet) (zdtun_t *tun, const char *pkt_buf, ssize_t pkt_size, uint8_t to_zdtun, const zdtun_conn_t *conn_info);
+  void (*account_packet) (zdtun_t *tun, const char *pkt_buf, int pkt_size, uint8_t to_zdtun, const zdtun_conn_t *conn_info);
 
   /*
    * @brief Called whenever a new socket is opened.
@@ -394,7 +395,7 @@ int zdtun_parse_pkt(const char *pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pinfo);
  *
  * @return zdtun_conn_t instance on success, NULL on failure.
  */
-zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, size_t pkt_len);
+zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, int pkt_len);
 
 /*
  * Forward a client packet through the pivot.

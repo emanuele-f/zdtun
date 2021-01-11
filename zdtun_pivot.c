@@ -41,7 +41,7 @@
 
 /* ******************************************************* */
 
-static int data_in(zdtun_t *tun, char *pkt_buf, ssize_t pkt_size, const zdtun_conn_t *conn_info) {
+static int data_in(zdtun_t *tun, char *pkt_buf, int pkt_size, const zdtun_conn_t *conn_info) {
   socket_t client_sock = *((socket_t *)zdtun_userdata(tun));
 
   con_send(client_sock, pkt_buf, pkt_size);

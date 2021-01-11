@@ -199,11 +199,11 @@ char* ipv4str(u_int32_t addr, char *buf) {
 /* ******************************************************* */
 
 // from http://minirighi.sourceforge.net/html/tcp_8c-source.html
-u_int16_t tcp_checksum(const void *buff, size_t len, u_int32_t src_addr, u_int32_t dest_addr) {
+u_int16_t tcp_checksum(const void *buff, int len, u_int32_t src_addr, u_int32_t dest_addr) {
   const uint16_t *buf=buff;
   uint16_t *ip_src=(void *)&src_addr, *ip_dst=(void *)&dest_addr;
   uint32_t sum;
-  size_t length=len;
+  int length=len;
 
   // Calculate the sum
   sum = 0;
@@ -237,7 +237,7 @@ u_int16_t tcp_checksum(const void *buff, size_t len, u_int32_t src_addr, u_int32
 /* ******************************************************* */
 
 // from DHCPd
-u_int16_t in_cksum(const char *buf, size_t nbytes, u_int32_t sum) {
+u_int16_t in_cksum(const char *buf, int nbytes, u_int32_t sum) {
   u_int16_t i;
 
   /* Checksum all the pairs of bytes first... */
@@ -265,7 +265,7 @@ static inline u_int16_t wrapsum(u_int32_t sum) {
   return htons(sum);
 }
 
-u_int16_t ip_checksum(const void *buf, size_t hdr_len) {
+u_int16_t ip_checksum(const void *buf, int hdr_len) {
   return wrapsum(in_cksum(buf, hdr_len, 0));
 }
 

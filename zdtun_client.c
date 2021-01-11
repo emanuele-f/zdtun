@@ -181,12 +181,12 @@ int main(int argc, char **argv) {
       } else if (ret > 0) {
 
         if(FD_ISSET(tun1_fd, &fdset)) {
-          ssize_t pkt_size = read(tun1_fd, pkt_buf, PACKET_BUFSIZE);
+          int pkt_size = read(tun1_fd, pkt_buf, PACKET_BUFSIZE);
 
           if(pkt_size < 0) {
             fatal("Error reading packet[%d]: %s", (int)pkt_size, strerror(errno));
           } else if(pkt_size < sizeof(struct iphdr)) {
-            error("Packet too small: %lu < %lu", sizeof(struct iphdr), pkt_size);
+            error("Packet too small: %lu < %d", sizeof(struct iphdr), pkt_size);
           } else
             send_server(pkt_buf, pkt_size);
         } else if(FD_ISSET(server_sock, &fdset))
