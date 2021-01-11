@@ -32,8 +32,8 @@
 #define UDP_HEADER_LEN 8
 
 #define ICMP_TIMEOUT_SEC 5
-#define UDP_TIMEOUT_SEC 30
-#define TCP_TIMEOUT_SEC 60
+#define UDP_TIMEOUT_SEC 15
+#define TCP_TIMEOUT_SEC 30
 
 #ifdef WIN32
   // 64 is the per-thread limit on Winsocks
@@ -41,6 +41,7 @@
   #define MAX_NUM_SOCKETS 55
   #define NUM_SOCKETS_AFTER_PURGE 40
 #else
+  // on linux, the maximum open files limit is 1024
   #define MAX_NUM_SOCKETS 128
   #define NUM_SOCKETS_AFTER_PURGE 96
 #endif
@@ -345,6 +346,9 @@ static inline void build_tcp_ip_header(zdtun_t *tun, zdtun_conn_t *conn, u_int8_
 // will be (later) destroyed by zdtun_purge_expired.
 // May be called multiple times.
 static void close_conn(zdtun_t *tun, zdtun_conn_t *conn) {
+  if(conn->status == CONN_STATUS_CLOSED)
+    return;
+
   if(conn->sock != INVALID_SOCKET)
     finalize_zdtun_sock(tun, conn);
 
@@ -355,7 +359,6 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn) {
   }
 
   if((conn->tuple.ipproto == IPPROTO_TCP)
-      && (conn->status != CONN_STATUS_CLOSED)
       && !conn->tcp.fin_ack_sent) {
     // Send TCP RST
     build_tcp_ip_header(tun, conn, TH_RST | TH_ACK, 0);
@@ -948,8 +951,11 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     if(socket_errno == socket_con_refused) {
       debug("TCP connection refused");
       rv = 0;
+    } else if(socket_errno == socket_con_reset) {
+      debug("TCP connection reset");
+      rv = 0;
     } else {
-      error("Error reading TCP packet[%ld]: %d", l4_len, socket_errno);
+      error("Error reading TCP packet[%d]", socket_errno);
       rv = -1;
     }
 

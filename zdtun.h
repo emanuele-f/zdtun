@@ -112,6 +112,7 @@ typedef SOCKET socket_t;
 #define socket_errno (WSAGetLastError())
 #define socket_in_progress (WSAEWOULDBLOCK)
 #define socket_con_refused (WSAECONNREFUSED)
+#define socket_con_reset (WSAECONNRESET)
 
 #else
 
@@ -121,6 +122,7 @@ typedef SOCKET socket_t;
 #define socket_errno (errno)
 #define socket_in_progress (EINPROGRESS)
 #define socket_con_refused (ECONNREFUSED)
+#define socket_con_reset (ECONNRESET)
 typedef int socket_t;
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
