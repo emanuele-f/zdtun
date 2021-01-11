@@ -48,6 +48,10 @@
 
 /* ******************************************************* */
 
+static void close_conn(zdtun_t *tun, zdtun_conn_t *conn);
+
+/* ******************************************************* */
+
 typedef enum {
   CONN_STATUS_NEW = 0,
   CONN_STATUS_CONNECTING,
@@ -98,6 +102,7 @@ typedef struct zdtun_t {
   void *user_data;
   fd_set all_fds;
   fd_set tcp_connecting;
+  int max_window_size;
   int all_max_fd;
   int num_open_socks;
   int num_active_connections;
@@ -209,6 +214,7 @@ zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
   }
 
   tun->user_data = udata;
+  tun->max_window_size = TCP_WINDOW_SIZE;
   memcpy(&tun->callbacks, callbacks, sizeof(tun->callbacks));
 
   FD_ZERO(&tun->all_fds);
@@ -259,11 +265,16 @@ void ztdun_finalize(zdtun_t *tun) {
 
 /* ******************************************************* */
 
-static inline int send_to_client(zdtun_t *tun, const zdtun_conn_t *conn, int size) {
+static inline int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int size) {
   int rv = tun->callbacks.send_client(tun, tun->reply_buf, size, conn);
 
-  if(tun->callbacks.account_packet)
+  if(rv == 0) {
+    if(tun->callbacks.account_packet)
       tun->callbacks.account_packet(tun, tun->reply_buf, size, 0 /* from zdtun */, conn);
+  } else {
+    error("send_client failed [%d]", rv);
+    close_conn(tun, conn);
+  }
 
   return(rv);
 }
@@ -318,7 +329,7 @@ static inline void build_tcp_ip_header(zdtun_t *tun, zdtun_conn_t *conn, u_int8_
   tcp_synack->th_ack = (flags & TH_ACK) ? htonl(conn->tcp.client_seq) : 0;
   tcp_synack->th_off = 5;
   tcp_synack->th_flags = flags;
-  tcp_synack->th_win = htons(TCP_WINDOW_SIZE);
+  tcp_synack->th_win = htons(tun->max_window_size);
 
   build_ip_header(conn, tun->reply_buf, l3_len, IPPROTO_TCP);
   struct iphdr *ip_header = (struct iphdr*) tun->reply_buf;
@@ -573,6 +584,12 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
 
 /* ******************************************************* */
 
+void zdtun_set_max_window_size(zdtun_t *tun, int max_len) {
+  tun->max_window_size = max_len;
+}
+
+/* ******************************************************* */
+
 // returns 0 on success
 // returns <0 on error
 // no_ack: can be used to avoid sending the ACK to the client and keep
@@ -665,9 +682,8 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     debug("Got TCP FIN+ACK from client");
 
     conn->tcp.client_seq += pkt->l7_len + 1;
-    build_tcp_ip_header(tun, conn, TH_FIN | TH_ACK, 0);
-    conn->tcp.fin_ack_sent = true;
 
+    build_tcp_ip_header(tun, conn, TH_ACK, 0);
     send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
     return 0;
   } else if(conn->sock == INVALID_SOCKET) {
@@ -676,7 +692,18 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   }
 
   if(data->th_flags & TH_ACK) {
-    conn->tcp.window_size = (conn->tcp.zdtun_seq - ntohl(data->th_ack)) + ntohs(data->th_win);
+    // Received ACK from the client, update the window. Take into account
+    // the in flight bytes which the client has not ACK-ed yet.
+    uint32_t ack_num = ntohl(data->th_ack);
+    uint32_t in_flight;
+
+    if(conn->tcp.zdtun_seq >= ack_num)
+      in_flight = conn->tcp.zdtun_seq - ack_num;
+    else
+      // TCP seq wrapped
+      in_flight = 0xFFFFFFFF - ack_num + conn->tcp.zdtun_seq + 1;
+
+    conn->tcp.window_size = min(ntohs(data->th_win), tun->max_window_size) - in_flight;
     process_pending_tcp_packets(tun, conn);
   }
 
