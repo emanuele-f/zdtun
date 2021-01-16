@@ -282,6 +282,9 @@ static inline int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int size) {
 /* ******************************************************* */
 
 static inline void finalize_zdtun_sock(zdtun_t *tun, zdtun_conn_t *conn) {
+  if(conn->sock == INVALID_SOCKET)
+    return;
+
   close_socket(tun, conn->sock);
   FD_CLR(conn->sock, &tun->all_fds);
   FD_CLR(conn->sock, &tun->tcp_connecting);
@@ -360,8 +363,7 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn) {
   if(conn->status == CONN_STATUS_CLOSED)
     return;
 
-  if(conn->sock != INVALID_SOCKET)
-    finalize_zdtun_sock(tun, conn);
+  finalize_zdtun_sock(tun, conn);
 
   if(conn->tcp.pending) {
     free(conn->tcp.pending->data);
@@ -468,11 +470,11 @@ zdtun_conn_t* zdtun_lookup(zdtun_t *tun, const zdtun_5tuple_t *tuple, uint8_t cr
 
 /* ******************************************************* */
 
-static void process_pending_tcp_packets(zdtun_t *tun, zdtun_conn_t *conn) {
+static int process_pending_tcp_packets(zdtun_t *tun, zdtun_conn_t *conn) {
   struct tcp_pending_data *pending = conn->tcp.pending;
 
   if(!conn->tcp.window_size || !pending || (conn->sock == INVALID_SOCKET))
-    return;
+    return 0;
 
   u_int16_t remaining = pending->size - pending->sofar;
   u_int16_t to_send = min(conn->tcp.window_size, remaining);
@@ -482,7 +484,9 @@ static void process_pending_tcp_packets(zdtun_t *tun, zdtun_conn_t *conn) {
 
   // proxy back the TCP port and reconstruct the TCP header
   build_tcp_ip_header(tun, conn, TH_PUSH | TH_ACK, to_send);
-  send_to_client(tun, conn, to_send + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
+
+  if(send_to_client(tun, conn, to_send + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) != 0)
+    return -1;
 
   conn->tcp.zdtun_seq += to_send;
   conn->tcp.window_size -= to_send;
@@ -496,6 +500,8 @@ static void process_pending_tcp_packets(zdtun_t *tun, zdtun_conn_t *conn) {
     FD_SET(conn->sock, &tun->all_fds);
   } else
     pending->sofar += to_send;
+
+  return 0;
 }
 
 /* ******************************************************* */
@@ -684,8 +690,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     conn->tcp.client_seq += pkt->l7_len + 1;
 
     build_tcp_ip_header(tun, conn, TH_ACK, 0);
-    send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
-    return 0;
+    return send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
   } else if(conn->sock == INVALID_SOCKET) {
     debug("Ignore write on closed socket");
     return 0;
@@ -704,7 +709,9 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       in_flight = 0xFFFFFFFF - ack_num + conn->tcp.zdtun_seq + 1;
 
     conn->tcp.window_size = min(ntohs(data->th_win), tun->max_window_size) - in_flight;
-    process_pending_tcp_packets(tun, conn);
+
+    if(process_pending_tcp_packets(tun, conn) != 0)
+      return -1;
   }
 
   // payload data (avoid sending ACK to an ACK)
@@ -1030,9 +1037,7 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     FD_CLR(conn->sock, &tun->all_fds);
 
     // try to send a little bit of data right now
-    process_pending_tcp_packets(tun, conn);
-
-    return 0;
+    return process_pending_tcp_packets(tun, conn);
   }
 
   // NAT back the TCP port and reconstruct the TCP header
@@ -1040,9 +1045,7 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   conn->tcp.zdtun_seq += l4_len;
   conn->tcp.window_size -= l4_len;
 
-  send_to_client(tun, conn, l4_len + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
-
-  return 0;
+  return send_to_client(tun, conn, l4_len + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
 }
 
 /* ******************************************************* */
@@ -1113,14 +1116,16 @@ static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   ip_header->check = 0;
   ip_header->check = ip_checksum(ip_header, ZDTUN_IP_HEADER_SIZE);
 
-  send_to_client(tun, conn, l3_len + ZDTUN_IP_HEADER_SIZE);
+  int rv = send_to_client(tun, conn, l3_len + ZDTUN_IP_HEADER_SIZE);
 
-  // ok
-  conn->tstamp = time(NULL);
+  if(rv == 0) {
+    // ok
+    conn->tstamp = time(NULL);
 
-  check_dns_purge(tun, conn, payload_ptr, l4_len);
+    check_dns_purge(tun, conn, payload_ptr, l4_len);
+  }
 
-  return 0;
+  return rv;
 }
 
 /* ******************************************************* */
