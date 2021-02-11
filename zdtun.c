@@ -146,23 +146,63 @@ void zdtun_fds(zdtun_t *tun, int *max_fd, fd_set *rdfd, fd_set *wrfd) {
 /* ******************************************************* */
 
 static socket_t open_socket(zdtun_t *tun, int domain, int type, int protocol) {
+  if(tun->num_open_socks >= MAX_NUM_SOCKETS)
+    return(INVALID_SOCKET);
+
   socket_t sock = socket(domain, type, protocol);
 
-  if((sock != INVALID_SOCKET) && tun->callbacks.on_socket_open)
+  if(sock == INVALID_SOCKET)
+    return(INVALID_SOCKET);
+
+#ifndef WIN32
+  /* FD_SETSIZE should never be execeeded, otherwise FD_SET will crash */
+  if((sock < 0) || (sock >= FD_SETSIZE)) {
+    if(sock >= 0)
+      closesocket(sock);
+
+    return(INVALID_SOCKET);
+  }
+#endif
+
+  if(tun->callbacks.on_socket_open)
     tun->callbacks.on_socket_open(tun, sock);
+
+  FD_SET(sock, &tun->all_fds);
+  tun->num_open_socks++;
+
+#ifndef WIN32
+  tun->all_max_fd = max(tun->all_max_fd, sock);
+#endif
+
+  switch(type) {
+    case SOCK_DGRAM:
+      tun->num_udp_opened++;
+      break;
+    case SOCK_STREAM:
+      tun->num_tcp_opened++;
+      break;
+  }
 
   return(sock);
 }
 
 /* ******************************************************* */
 
-static int close_socket(zdtun_t *tun, socket_t sock) {
+static void close_socket(zdtun_t *tun, socket_t sock) {
+  if(sock == INVALID_SOCKET)
+    return;
+
   int rv = closesocket(sock);
 
-  if((rv == 0) && tun->callbacks.on_socket_close)
+  if(rv == SOCKET_ERROR) {
+    error("closesocket failed[%d]", socket_errno);
+  } else if(tun->callbacks.on_socket_close)
     tun->callbacks.on_socket_close(tun, sock);
 
-  return(rv);
+  FD_CLR(sock, &tun->all_fds);
+  FD_CLR(sock, &tun->tcp_connecting);
+
+  tun->num_open_socks = max(tun->num_open_socks-1, 0);
 }
 
 /* ******************************************************* */
@@ -234,12 +274,6 @@ zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
     error("Cannot create ICMP socket[%d]", socket_errno);
     free(tun);
     return NULL;
-  } else {
-    FD_SET(tun->icmp_socket, &tun->all_fds);
-#ifndef WIN32
-    tun->all_max_fd = max(tun->all_max_fd, tun->icmp_socket);
-#endif
-    tun->num_open_socks++;
   }
 #endif
 
@@ -281,26 +315,6 @@ static inline int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int size) {
   }
 
   return(rv);
-}
-
-/* ******************************************************* */
-
-static inline void finalize_zdtun_sock(zdtun_t *tun, zdtun_conn_t *conn) {
-  if(conn->sock == INVALID_SOCKET)
-    return;
-
-  close_socket(tun, conn->sock);
-  FD_CLR(conn->sock, &tun->all_fds);
-  FD_CLR(conn->sock, &tun->tcp_connecting);
-
-#ifndef WIN32
-  tun->all_max_fd = max(tun->all_max_fd, conn->sock-1);
-#endif
-  tun->num_open_socks--;
-
-  // mark as closed. The client communication can still go on (e.g. client
-  // sending ACK to FIN+ACK
-  conn->sock = INVALID_SOCKET;
 }
 
 /* ******************************************************* */
@@ -367,7 +381,8 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn) {
   if(conn->status == CONN_STATUS_CLOSED)
     return;
 
-  finalize_zdtun_sock(tun, conn);
+  close_socket(tun, conn->sock);
+  conn->sock = INVALID_SOCKET;
 
   if(conn->tcp.pending) {
     free(conn->tcp.pending->data);
@@ -626,8 +641,6 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       return -1;
     }
 
-    tun->num_tcp_opened++;
-
     // Setup for the connection
     struct sockaddr_in servaddr = {0};
     servaddr.sin_family = AF_INET;
@@ -658,18 +671,12 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       }
     }
 
-    FD_SET(tcp_sock, &tun->all_fds);
     conn->sock = tcp_sock;
     conn->tcp.client_seq = ntohl(data->th_seq) + 1;
     conn->tcp.zdtun_seq = 0x77EB77EB;
 
     if(tun->callbacks.account_packet)
       tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
-
-#ifndef WIN32
-    tun->all_max_fd = max(tun->all_max_fd, tcp_sock);
-#endif
-    tun->num_open_socks++;
 
     if(!in_progress)
       return tcp_socket_syn(tun, conn);
@@ -756,13 +763,6 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
       error("Cannot create UDP socket[%d]", socket_errno);
       return -1;
     }
-
-    FD_SET(udp_sock, &tun->all_fds);
-#ifndef WIN32    
-    tun->all_max_fd = max(tun->all_max_fd, udp_sock);
-#endif
-    tun->num_open_socks++;
-    tun->num_udp_opened++;
 
     conn->sock = udp_sock;
     conn->status = CONN_STATUS_CONNECTED;
@@ -1014,7 +1014,9 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     }
 
     // close the socket, otherwise select will keep triggering
-    finalize_zdtun_sock(tun, conn);
+    // The client communication can still go on (e.g. client sending ACK to FIN+ACK)
+    close_socket(tun, conn->sock);
+    conn->sock = INVALID_SOCKET;
 
     return 0;
   }
@@ -1234,7 +1236,7 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now) {
     }
   }
 
-  if(tun->num_open_socks > MAX_NUM_SOCKETS) {
+  if(tun->num_open_socks >= MAX_NUM_SOCKETS) {
     int to_purge = tun->num_open_socks - NUM_SOCKETS_AFTER_PURGE;
 
     debug("FORCE PURGE %d items", to_purge);
@@ -1299,6 +1301,7 @@ void zdtun_get_stats(zdtun_t *tun, zdtun_statistics_t *stats) {
   }
 
   stats->num_open_sockets = tun->num_open_socks;
+  stats->all_max_fd = tun->all_max_fd;
 
   // totals
   stats->num_icmp_opened = tun->num_icmp_opened;

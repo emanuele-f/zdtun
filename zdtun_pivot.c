@@ -64,7 +64,8 @@ static void print_zdtun_stats(zdtun_t *tun) {
   eprintf("  num_open_sockets: %u\n", stats->num_open_sockets);
   eprintf("  num_icmp_conn: %u\n", stats->num_icmp_conn);
   eprintf("  num_tcp_conn: %u\n", stats->num_tcp_conn);
-  eprintf("  num_udp_conn: %u\n\n", stats->num_udp_conn);
+  eprintf("  num_udp_conn: %u\n", stats->num_udp_conn);
+  eprintf("  all_max_fd: %d\n\n", stats->all_max_fd);
   eprintf("  oldest_icmp_conn: %lu sec ago\n", (stats->oldest_icmp_conn) ? (now - stats->oldest_icmp_conn) : 0);
   eprintf("  oldest_tcp_conn: %lu sec ago\n", (stats->oldest_tcp_conn) ? (now - stats->oldest_tcp_conn) : 0);
   eprintf("  oldest_udp_conn: %lu sec ago\n", (stats->oldest_udp_conn) ? (now - stats->oldest_udp_conn) : 0);

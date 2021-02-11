@@ -173,6 +173,7 @@ typedef struct zdtun_statistics {
   time_t oldest_udp_conn;               ///< timestamp of the oldest active UDP connection
 
   u_int32_t num_open_sockets;           ///< number of opened sockets in zdtun
+  int all_max_fd;                       ///< select nfds value
 } zdtun_statistics_t;
 
 // packed - to be used with uthash
