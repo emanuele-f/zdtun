@@ -155,10 +155,13 @@ static socket_t open_socket(zdtun_t *tun, int domain, int type, int protocol) {
     return(INVALID_SOCKET);
 
 #ifndef WIN32
+  if(sock < 0)
+    return(INVALID_SOCKET);
+
   /* FD_SETSIZE should never be execeeded, otherwise FD_SET will crash */
-  if((sock < 0) || (sock >= FD_SETSIZE)) {
-    if(sock >= 0)
-      closesocket(sock);
+  if(sock >= FD_SETSIZE) {
+    error("socket exceeds FD_SETSIZE");
+    closesocket(sock);
 
     return(INVALID_SOCKET);
   }
