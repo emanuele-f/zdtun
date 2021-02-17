@@ -63,8 +63,8 @@ typedef enum {
 
 struct tcp_pending_data {
   char *data;
-  u_int16_t size;
-  u_int16_t sofar;
+  int size;
+  int sofar;
 };
 
 typedef struct zdtun_conn {
@@ -424,6 +424,8 @@ void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
 /* ******************************************************* */
 
 static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
+  int rv = 0;
+
   // disable non-blocking mode from now on
 
 #ifdef WIN32
@@ -441,18 +443,20 @@ static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
 
   // send the SYN+ACK
   build_tcp_ip_header(tun, conn, TH_SYN | TH_ACK, 0);
-  conn->tcp.zdtun_seq += 1;
 
-  return send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
+  if((rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE)) == 0)
+    conn->tcp.zdtun_seq += 1;
+
+  return rv;
 }
 
 /* ******************************************************* */
 
 static void tcp_socket_fin_ack(zdtun_t *tun, zdtun_conn_t *conn) {
   build_tcp_ip_header(tun, conn, TH_FIN | TH_ACK, 0);
-  conn->tcp.zdtun_seq += 1;
 
-  send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
+  if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) == 0)
+    conn->tcp.zdtun_seq += 1;
 }
 
 /* ******************************************************* */
@@ -498,20 +502,24 @@ static int process_pending_tcp_packets(zdtun_t *tun, zdtun_conn_t *conn) {
   if(!conn->tcp.window_size || !pending || (conn->sock == INVALID_SOCKET))
     return 0;
 
-  u_int16_t remaining = pending->size - pending->sofar;
-  u_int16_t to_send = min(conn->tcp.window_size, remaining);
+  int remaining = pending->size - pending->sofar;
+  int to_send = min(conn->tcp.window_size, remaining);
 
-  log_tcp_window("Sending %d/%d bytes pending data", to_send, remaining);
+  log_tcp_window("[%d][Window size: %d] Sending %d/%d bytes pending data", conn->tuple.src_port, conn->tcp.window_size, to_send, remaining);
   memcpy(tun->reply_buf + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE, &pending->data[pending->sofar], to_send);
 
   // proxy back the TCP port and reconstruct the TCP header
   build_tcp_ip_header(tun, conn, TH_PUSH | TH_ACK, to_send);
 
-  if(send_to_client(tun, conn, to_send + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) != 0)
+  if(send_to_client(tun, conn, to_send + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) != 0) {
+    log_tcp_window("[%d][Window size: %d] failed", conn->tuple.src_port, conn->tcp.window_size);
     return -1;
+  }
 
   conn->tcp.zdtun_seq += to_send;
   conn->tcp.window_size -= to_send;
+
+  log_tcp_window("[%d][Window size: %d] Remaining to send: %d", conn->tuple.src_port, conn->tcp.window_size, remaining - to_send);
 
   if(remaining == to_send) {
     free(pending->data);
@@ -1029,18 +1037,25 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
             ipv4str(conn->tuple.src_ip, buf2), ntohs(conn->tuple.src_port));
 
   if((conn->tcp.pending) || (conn->tcp.window_size < l4_len)) {
-    log_tcp_window("Insufficient window size detected [%d], queuing", conn->tcp.window_size);
+    log_tcp_window("[%d] Insufficient window size detected [window=%d, l4=%d, pending=%d], queuing",
+        conn->tuple.src_port, conn->tcp.window_size, l4_len, (conn->tcp.pending ? conn->tcp.pending->size : 0));
 
-    struct tcp_pending_data *pending;
+    struct tcp_pending_data *pending = conn->tcp.pending;
 
-    safe_alloc(pending, struct tcp_pending_data);
-    pending->size = l4_len;
-    pending->data = (char*) malloc(l4_len);
+    if(!pending) {
+      safe_alloc(pending, struct tcp_pending_data);
+      pending->size = 0;
+      pending->data = NULL;
+      conn->tcp.pending = pending;
+    }
+
+    pending->data = (char*) realloc(pending->data, pending->size + l4_len);
+
     if(!pending->data)
-      fatal("malloc tcp.pending_data failed");
+        fatal("realloc tcp.pending_data failed");
 
-    memcpy(pending->data, payload_ptr, l4_len);
-    conn->tcp.pending = pending;
+    memcpy(pending->data + pending->size, payload_ptr, l4_len);
+    pending->size += l4_len;
 
     // stop receiving updates for the socket
     FD_CLR(conn->sock, &tun->all_fds);
@@ -1051,10 +1066,14 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
   // NAT back the TCP port and reconstruct the TCP header
   build_tcp_ip_header(tun, conn, TH_PUSH | TH_ACK, l4_len);
-  conn->tcp.zdtun_seq += l4_len;
-  conn->tcp.window_size -= l4_len;
 
-  return send_to_client(tun, conn, l4_len + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
+  if(send_to_client(tun, conn, l4_len + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) == 0) {
+    conn->tcp.zdtun_seq += l4_len;
+    conn->tcp.window_size -= l4_len;
+  } else
+    return -1;
+
+  return 0;
 }
 
 /* ******************************************************* */
@@ -1179,27 +1198,31 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
 
   HASH_ITER(hh, tun->conn_table, conn, tmp) {
     uint8_t ipproto = conn->tuple.ipproto;
+    int rv = 0;
 
     if(conn->sock == INVALID_SOCKET)
       continue;
 
     if(FD_ISSET(conn->sock, rd_fds)) {
       if(ipproto == IPPROTO_TCP)
-        handle_tcp_reply(tun, conn);
+        rv = handle_tcp_reply(tun, conn);
       else if(ipproto == IPPROTO_UDP)
-        handle_udp_reply(tun, conn);
+        rv = handle_udp_reply(tun, conn);
       else
         error("Unhandled socket.rd proto: %d", ipproto);
 
       num_hits++;
     } else if(FD_ISSET(conn->sock, wr_fds)) {
       if(ipproto == IPPROTO_TCP)
-        handle_tcp_connect_async(tun, conn);
+        rv = handle_tcp_connect_async(tun, conn);
       else
         error("Unhandled socket.wr proto: %d", ipproto);
 
       num_hits++;
     }
+
+    if(rv != 0)
+      break;
   }
 
   return num_hits;
