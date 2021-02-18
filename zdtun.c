@@ -739,8 +739,18 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   // payload data (avoid sending ACK to an ACK)
   if(pkt->l7_len > 0) {
     if(send(conn->sock, pkt->l7, pkt->l7_len, 0) < 0) {
-      error("TCP send error[%d]", socket_errno);
-      return -1;
+      int rv;
+
+      if(socket_errno == socket_con_reset) {
+        debug("TCP connection reset");
+        rv = 0;
+      } else {
+        error("TCP send error[%d]", socket_errno);
+        rv = -1;
+      }
+
+      close_conn(tun, conn);
+      return rv;
     }
 
     if(!no_ack) {
