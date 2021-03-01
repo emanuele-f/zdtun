@@ -103,12 +103,8 @@ typedef struct zdtun_t {
   fd_set all_fds;
   fd_set tcp_connecting;
   int max_window_size;
-  int all_max_fd;
-  int num_open_socks;
-  int num_active_connections;
-  u_int32_t num_icmp_opened;
-  u_int32_t num_tcp_opened;
-  u_int32_t num_udp_opened;
+  zdtun_statistics_t stats;
+
 #ifndef ZDTUN_SKIP_ICMP
   socket_t icmp_socket;
 #endif
@@ -138,7 +134,7 @@ struct dns_packet {
 /* ******************************************************* */
 
 void zdtun_fds(zdtun_t *tun, int *max_fd, fd_set *rdfd, fd_set *wrfd) {
-  *max_fd = tun->all_max_fd;
+  *max_fd = tun->stats.all_max_fd;
   *rdfd = tun->all_fds;
   *wrfd = tun->tcp_connecting;
 }
@@ -146,7 +142,7 @@ void zdtun_fds(zdtun_t *tun, int *max_fd, fd_set *rdfd, fd_set *wrfd) {
 /* ******************************************************* */
 
 static socket_t open_socket(zdtun_t *tun, int domain, int type, int protocol) {
-  if(tun->num_open_socks >= MAX_NUM_SOCKETS)
+  if(tun->stats.num_open_sockets >= MAX_NUM_SOCKETS)
     return(INVALID_SOCKET);
 
   socket_t sock = socket(domain, type, protocol);
@@ -171,18 +167,18 @@ static socket_t open_socket(zdtun_t *tun, int domain, int type, int protocol) {
     tun->callbacks.on_socket_open(tun, sock);
 
   FD_SET(sock, &tun->all_fds);
-  tun->num_open_socks++;
+  tun->stats.num_open_sockets++;
 
 #ifndef WIN32
-  tun->all_max_fd = max(tun->all_max_fd, sock);
+  tun->stats.all_max_fd = max(tun->stats.all_max_fd, sock);
 #endif
 
   switch(type) {
     case SOCK_DGRAM:
-      tun->num_udp_opened++;
+      tun->stats.num_udp_opened++;
       break;
     case SOCK_STREAM:
-      tun->num_tcp_opened++;
+      tun->stats.num_tcp_opened++;
       break;
   }
 
@@ -205,7 +201,7 @@ static void close_socket(zdtun_t *tun, socket_t sock) {
   FD_CLR(sock, &tun->all_fds);
   FD_CLR(sock, &tun->tcp_connecting);
 
-  tun->num_open_socks = max(tun->num_open_socks-1, 0);
+  tun->stats.num_open_sockets = max(tun->stats.num_open_sockets-1, 0);
 }
 
 /* ******************************************************* */
@@ -233,6 +229,10 @@ int zdtun_conn_dnat(zdtun_conn_t *conn, uint32_t dest_ip, uint16_t dest_port) {
 
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn) {
   return &conn->tuple;
+}
+
+time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn) {
+    return conn->tstamp;
 }
 
 /* ******************************************************* */
@@ -415,7 +415,17 @@ void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
 
   close_conn(tun, conn);
 
-  tun->num_active_connections--;
+  switch(conn->tuple.ipproto) {
+    case IPPROTO_TCP:
+      tun->stats.num_tcp_conn--;
+      break;
+    case IPPROTO_UDP:
+      tun->stats.num_udp_conn--;
+      break;
+    case IPPROTO_ICMP:
+      tun->stats.num_icmp_conn--;
+      break;
+  }
 
   HASH_DELETE(hh, tun->conn_table, conn);
   free(conn);
@@ -467,7 +477,7 @@ zdtun_conn_t* zdtun_lookup(zdtun_t *tun, const zdtun_5tuple_t *tuple, uint8_t cr
   HASH_FIND(hh, tun->conn_table, tuple, sizeof(*tuple), conn);
 
   if(!conn && create) {
-    if(tun->num_open_socks >= MAX_NUM_SOCKETS) {
+    if(tun->stats.num_open_sockets >= MAX_NUM_SOCKETS) {
       debug("Force purge!");
       zdtun_purge_expired(tun, time(NULL));
     }
@@ -488,7 +498,17 @@ zdtun_conn_t* zdtun_lookup(zdtun_t *tun, const zdtun_5tuple_t *tuple, uint8_t cr
 
     HASH_ADD(hh, tun->conn_table, tuple, sizeof(*tuple), conn);
 
-    tun->num_active_connections++;
+    switch(conn->tuple.ipproto) {
+      case IPPROTO_TCP:
+        tun->stats.num_tcp_conn++;
+        break;
+      case IPPROTO_UDP:
+        tun->stats.num_udp_conn++;
+        break;
+      case IPPROTO_ICMP:
+        tun->stats.num_icmp_conn++;
+        break;
+    }
   }
 
   return conn;
@@ -820,7 +840,7 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
   debug("ICMP[len=%u] id=%d type=%d code=%d", icmp_len, data->un.echo.id, data->type, data->code);
 
   if(conn->status == CONN_STATUS_NEW) {
-    tun->num_icmp_opened++;
+    tun->stats.num_icmp_opened++;
 
     conn->status = CONN_STATUS_CONNECTED;
   }
@@ -1272,8 +1292,8 @@ void zdtun_purge_expired(zdtun_t *tun, time_t now) {
     }
   }
 
-  if(tun->num_open_socks >= MAX_NUM_SOCKETS) {
-    int to_purge = tun->num_open_socks - NUM_SOCKETS_AFTER_PURGE;
+  if(tun->stats.num_open_sockets >= MAX_NUM_SOCKETS) {
+    int to_purge = tun->stats.num_open_sockets - NUM_SOCKETS_AFTER_PURGE;
 
     debug("FORCE PURGE %d items", to_purge);
 
@@ -1309,38 +1329,11 @@ int zdtun_iter_connections(zdtun_t *tun, zdtun_conn_iterator_t iterator, void *u
 /* ******************************************************* */
 
 int zdtun_get_num_connections(zdtun_t *tun) {
-    return(tun->num_active_connections);
+    return(tun->stats.num_tcp_conn + tun->stats.num_udp_conn + tun->stats.num_icmp_conn);
 }
 
 /* ******************************************************* */
 
 void zdtun_get_stats(zdtun_t *tun, zdtun_statistics_t *stats) {
-  zdtun_conn_t *conn, *tmp;
-
-  memset(stats, 0, sizeof(*stats));
-
-  HASH_ITER(hh, tun->conn_table, conn, tmp) {
-    switch(conn->tuple.ipproto) {
-      case IPPROTO_ICMP:
-        stats->num_icmp_conn++;
-        stats->oldest_icmp_conn = (stats->oldest_icmp_conn) ? (min(stats->oldest_icmp_conn, conn->tstamp)) : conn->tstamp;
-        break;
-      case IPPROTO_TCP:
-        stats->num_tcp_conn++;
-        stats->oldest_tcp_conn = (stats->oldest_tcp_conn) ? (min(stats->oldest_tcp_conn, conn->tstamp)) : conn->tstamp;
-        break;
-      case IPPROTO_UDP:
-        stats->num_udp_conn++;
-        stats->oldest_udp_conn = (stats->oldest_udp_conn) ? (min(stats->oldest_udp_conn, conn->tstamp)) : conn->tstamp;
-        break;
-    }
-  }
-
-  stats->num_open_sockets = tun->num_open_socks;
-  stats->all_max_fd = tun->all_max_fd;
-
-  // totals
-  stats->num_icmp_opened = tun->num_icmp_opened;
-  stats->num_udp_opened = tun->num_udp_opened;
-  stats->num_tcp_opened = tun->num_tcp_opened;
+  *stats = tun->stats;
 }

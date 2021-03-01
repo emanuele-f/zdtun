@@ -50,12 +50,46 @@ static int data_in(zdtun_t *tun, char *pkt_buf, int pkt_size, const zdtun_conn_t
 
 /* ******************************************************* */
 
+typedef struct iter_data {
+  time_t oldest_icmp_conn;
+  time_t oldest_tcp_conn;
+  time_t oldest_udp_conn;
+} iter_data;
+
+static int conn_iterator(zdtun_t *tun, const zdtun_conn_t *conn_info, void *userdata) {
+  iter_data *idata = (iter_data*) userdata;
+  const zdtun_5tuple_t *tuple = zdtun_conn_get_5tuple(conn_info);
+  time_t last_seen = zdtun_conn_get_last_seen(conn_info);
+
+  switch(tuple->ipproto) {
+    case IPPROTO_ICMP:
+      idata->oldest_icmp_conn = (idata->oldest_icmp_conn) ? (min(idata->oldest_icmp_conn, last_seen)) : last_seen;
+      break;
+    case IPPROTO_TCP:
+      idata->oldest_tcp_conn = (idata->oldest_tcp_conn) ? (min(idata->oldest_tcp_conn, last_seen)) : last_seen;
+      break;
+    case IPPROTO_UDP:
+      idata->oldest_udp_conn = (idata->oldest_udp_conn) ? (min(idata->oldest_udp_conn, last_seen)) : last_seen;
+      break;
+  }
+
+  // continue
+  return 0;
+}
+
+/* ******************************************************* */
+
 static void print_zdtun_stats(zdtun_t *tun) {
   time_t now = time(NULL);
 
   struct zdtun_statistics _stats;
+  iter_data idata;
   struct zdtun_statistics *stats = &_stats;
   zdtun_get_stats(tun, stats);
+
+  memset(&idata, 0, sizeof(idata));
+
+  zdtun_iter_connections(tun, &conn_iterator, &idata);
 
   eprintf("**** ZDTUN STATS ****\n");
   eprintf("  tot_icmp_opened: %u\n", stats->num_icmp_opened);
@@ -66,9 +100,9 @@ static void print_zdtun_stats(zdtun_t *tun) {
   eprintf("  num_tcp_conn: %u\n", stats->num_tcp_conn);
   eprintf("  num_udp_conn: %u\n", stats->num_udp_conn);
   eprintf("  all_max_fd: %d\n\n", stats->all_max_fd);
-  eprintf("  oldest_icmp_conn: %lu sec ago\n", (stats->oldest_icmp_conn) ? (now - stats->oldest_icmp_conn) : 0);
-  eprintf("  oldest_tcp_conn: %lu sec ago\n", (stats->oldest_tcp_conn) ? (now - stats->oldest_tcp_conn) : 0);
-  eprintf("  oldest_udp_conn: %lu sec ago\n", (stats->oldest_udp_conn) ? (now - stats->oldest_udp_conn) : 0);
+  eprintf("  oldest_icmp_conn: %lu sec ago\n", (idata.oldest_icmp_conn) ? (now - idata.oldest_icmp_conn) : 0);
+  eprintf("  oldest_tcp_conn: %lu sec ago\n", (idata.oldest_tcp_conn) ? (now - idata.oldest_tcp_conn) : 0);
+  eprintf("  oldest_udp_conn: %lu sec ago\n", (idata.oldest_udp_conn) ? (now - idata.oldest_udp_conn) : 0);
   eprintf("********************\n\n");
 }
 

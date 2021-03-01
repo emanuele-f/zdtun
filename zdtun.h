@@ -168,10 +168,6 @@ typedef struct zdtun_statistics {
   u_int32_t num_tcp_opened;             ///< total number of TCP connections (since zdtun_init)
   u_int32_t num_udp_opened;             ///< total number of UDP connections (since zdtun_init)
 
-  time_t oldest_icmp_conn;              ///< timestamp of the oldest active ICMP connection
-  time_t oldest_tcp_conn;               ///< timestamp of the oldest active TCP connection
-  time_t oldest_udp_conn;               ///< timestamp of the oldest active UDP connection
-
   u_int32_t num_open_sockets;           ///< number of opened sockets in zdtun
   int all_max_fd;                       ///< select nfds value
 } zdtun_statistics_t;
@@ -447,5 +443,6 @@ void* zdtun_conn_get_userdata(const zdtun_conn_t *conn);
 void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata);
 int zdtun_conn_dnat(zdtun_conn_t *conn, uint32_t dest_ip, uint16_t dest_port);
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
+time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);
 
 #endif
