@@ -10,7 +10,6 @@ if(ANDROID)
 
   TARGET_LINK_LIBRARIES(zdtun)
   add_definitions(-DANDROID)
-  add_definitions(-DZDTUN_SKIP_ICMP)
 
   find_library(log-lib log)
 

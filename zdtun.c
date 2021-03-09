@@ -77,19 +77,13 @@ typedef struct zdtun_conn {
   u_int32_t dnat_ip;
   u_int16_t dnat_port;
 
-  union {
-    struct {
-      u_int32_t client_seq;    // next client sequence number
-      u_int32_t zdtun_seq;     // next proxy sequence number
-      u_int16_t window_size;   // client window size
-      bool fin_ack_sent;
-      struct tcp_pending_data *pending;
-    } tcp;
-    struct {
-      u_int16_t echo_id;
-      u_int16_t echo_seq;
-    } icmp;
-  };
+  struct {
+    u_int32_t client_seq;    // next client sequence number
+    u_int32_t zdtun_seq;     // next proxy sequence number
+    u_int16_t window_size;   // client window size
+    bool fin_ack_sent;
+    struct tcp_pending_data *pending;
+  } tcp;
 
   void *user_data;
   UT_hash_handle hh;  // tuple -> conn
@@ -104,10 +98,6 @@ typedef struct zdtun_t {
   fd_set tcp_connecting;
   int max_window_size;
   zdtun_statistics_t stats;
-
-#ifndef ZDTUN_SKIP_ICMP
-  socket_t icmp_socket;
-#endif
   char reply_buf[REPLY_BUF_SIZE];
 
   zdtun_conn_t *sock_2_conn;
@@ -173,12 +163,15 @@ static socket_t open_socket(zdtun_t *tun, int domain, int type, int protocol) {
   tun->stats.all_max_fd = max(tun->stats.all_max_fd, sock);
 #endif
 
-  switch(type) {
-    case SOCK_DGRAM:
+  switch(protocol) {
+    case IPPROTO_UDP:
       tun->stats.num_udp_opened++;
       break;
-    case SOCK_STREAM:
+    case IPPROTO_TCP:
       tun->stats.num_tcp_opened++;
+      break;
+    case IPPROTO_ICMP:
+      tun->stats.num_icmp_opened++;
       break;
   }
 
@@ -263,23 +256,6 @@ zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
   FD_ZERO(&tun->all_fds);
   FD_ZERO(&tun->tcp_connecting);
 
-#ifndef ZDTUN_SKIP_ICMP
-  /* NOTE:
-   *  - on linux, socket(PF_INET, SOCK_DGRAM, IPPROTO_ICMP) is not permitted
-   *  - on Android, socket(PF_INET, SOCK_RAW, IPPROTO_ICMP) is not permitted
-   *
-   * Supporting a SOCK_DGRAM requires some changes as the IP data is missing
-   * and sendto must be used.
-   */
-  tun->icmp_socket = open_socket(tun, PF_INET, SOCK_RAW, IPPROTO_ICMP);
-
-  if(tun->icmp_socket == INVALID_SOCKET) {
-    error("Cannot create ICMP socket[%d]", socket_errno);
-    free(tun);
-    return NULL;
-  }
-#endif
-
   return tun;
 }
 
@@ -291,11 +267,6 @@ void ztdun_finalize(zdtun_t *tun) {
   HASH_ITER(hh, tun->conn_table, conn, tmp) {
     zdtun_destroy_conn(tun, conn);
   }
-
-#ifndef ZDTUN_SKIP_ICMP
-  if(tun->icmp_socket)
-    close_socket(tun, tun->icmp_socket);
-#endif
 
   free(tun);
 }
@@ -627,7 +598,7 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
 
     pkt->l4_hdr_len = sizeof(struct icmphdr);
     pkt->tuple.echo_id = data->un.echo.id;
-    pkt->tuple.echo_seq = data->un.echo.sequence;
+    pkt->tuple.dst_port = 0;
   } else {
     debug("Packet with unknown protocol: %u", ip_header->protocol);
     return -3;
@@ -819,6 +790,7 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
 
   if(sendto(conn->sock, pkt->l7, pkt->l7_len, 0, (struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
     error("UDP sendto error[%d]", socket_errno);
+    close_conn(tun, conn);
     return -1;
   }
 
@@ -827,23 +799,40 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
 
 /* ******************************************************* */
 
-#ifndef ZDTUN_SKIP_ICMP
-
 /* NOTE: a collision may occure between ICMP packets seq from host and tunneled packets, we ignore it */
 static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
   struct icmphdr *data = pkt->icmp;
   char buf1[INET_ADDRSTRLEN], buf2[INET_ADDRSTRLEN];
   const uint16_t icmp_len = pkt->l4_hdr_len + pkt->l7_len;
 
-  debug("[ICMP.fw]-> %s -> %s", ipv4str(conn->tuple.src_ip, buf1),
-    ipv4str(conn->tuple.dst_ip, buf2));
-  debug("ICMP[len=%u] id=%d type=%d code=%d", icmp_len, data->un.echo.id, data->type, data->code);
-
   if(conn->status == CONN_STATUS_NEW) {
-    tun->stats.num_icmp_opened++;
+    /*
+     * Either a SOCK_RAW or SOCK_DGRAM can be used. The SOCK_DGRAM, however, does not require root
+     * privileges, so it is a better choice (also for Android). See https://lwn.net/Articles/443051
+     * for more details.
+     *
+     * However the SOCK_DGRAM:
+     *  - Contrary to the RAW socket, requires a separate socket per ICMP connection.
+     *  - The reply received via recv misses the IP header.
+     *  - Does not honor all the ICMP header fields (e.g. the ICMP echo ID).
+     */
+    socket_t icmp_sock = open_socket(tun, PF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    debug("Allocating new ICMP socket for id %d", ntohs(data->un.echo.id));
 
+    if(icmp_sock == INVALID_SOCKET) {
+      error("Cannot create ICMP socket[%d]", socket_errno);
+      return -1;
+    }
+
+    conn->sock = icmp_sock;
     conn->status = CONN_STATUS_CONNECTED;
+    conn->tuple.src_port = data->un.echo.id;
   }
+
+  debug("[ICMP.fw] %s -> %s", ipv4str(conn->tuple.src_ip, buf1),
+    ipv4str(conn->tuple.dst_ip, buf2));
+  debug("ICMP.fw[len=%u] id=%d seq=%d type=%d code=%d", icmp_len, data->un.echo.id,
+          data->un.echo.sequence, data->type, data->code);
 
   if(tun->callbacks.account_packet)
     tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
@@ -852,15 +841,14 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
   servaddr.sin_family = AF_INET;
   servaddr.sin_addr.s_addr = conn->dnat_ip ? conn->dnat_ip : conn->tuple.dst_ip;
 
-  if(sendto(tun->icmp_socket, data, icmp_len, 0, (struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
+  if(sendto(conn->sock, data, icmp_len, 0, (struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
     error("ICMP sendto error[%d]", socket_errno);
+    close_conn(tun, conn);
     return -1;
   }
 
   return 0;
 }
-
-#endif
 
 /* ******************************************************* */
 
@@ -879,11 +867,9 @@ static int zdtun_forward_full(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t
     case IPPROTO_UDP:
       rv = handle_udp_fwd(tun, pkt, conn);
       break;
-#ifndef ZDTUN_SKIP_ICMP
     case IPPROTO_ICMP:
       rv = handle_icmp_fwd(tun, pkt, conn);
       break;
-#endif
     default:
       error("Ignoring unhandled IP protocol %d", pkt->tuple.ipproto);
       return -2;
@@ -949,72 +935,53 @@ zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, int pkt_len)
 
 /* ******************************************************* */
 
-#ifndef ZDTUN_SKIP_ICMP
+static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
+  int icmp_len = recv(conn->sock, tun->reply_buf + ZDTUN_IP_HEADER_SIZE,
+          REPLY_BUF_SIZE - ZDTUN_IP_HEADER_SIZE, 0);
 
-static int handle_icmp_reply(zdtun_t *tun) {
-  char *payload_ptr = tun->reply_buf;
-  int l3_len = recv(tun->icmp_socket, payload_ptr, REPLY_BUF_SIZE, 0);
-
-  if(l3_len == SOCKET_ERROR) {
-    error("Error reading ICMP packet[%d]: %d", l3_len, socket_errno);
+  if(icmp_len == SOCKET_ERROR) {
+    error("Error reading ICMP packet[%d]: %d", icmp_len, socket_errno);
+    close_conn(tun, conn);
     return -1;
   }
-
-  struct iphdr *ip_header = (struct iphdr*)payload_ptr;
-  int ip_header_size = ip_header->ihl * 4;
-  int icmp_len = l3_len - ip_header_size;
 
   if(icmp_len < sizeof(struct icmphdr)) {
     error("ICMP packet too small[%d]", icmp_len);
+    close_conn(tun, conn);
     return -1;
   }
 
-  struct icmphdr *data = (struct icmphdr*) &payload_ptr[ip_header_size];
+  struct icmphdr *data = (struct icmphdr*) &tun->reply_buf[ZDTUN_IP_HEADER_SIZE];
   char buf1[INET_ADDRSTRLEN], buf2[INET_ADDRSTRLEN];
 
   if((data->type != ICMP_ECHO) && (data->type != ICMP_ECHOREPLY)) {
     log_packet("Discarding unsupported ICMP[%d]", data->type);
+    close_conn(tun, conn);
     return 0;
   }
 
-  log_packet("[ICMP.re] %s -> %s", ipv4str(ip_header->saddr, buf1), ipv4str(ip_header->daddr, buf2));
-  debug("ICMP[len=%d] id=%d type=%d code=%d", icmp_len, data->un.echo.id, data->type, data->code);
+  // Reset the correct ID (the kernel changes it)
+  data->un.echo.id = conn->tuple.echo_id;
 
-  zdtun_conn_t *conn = NULL;
-  zdtun_conn_t *cur, *tmp;
+  debug("[ICMP.re]-> %s -> %s", ipv4str(conn->tuple.dst_ip, buf1),
+          ipv4str(conn->tuple.src_ip, buf2));
 
-  // Need to manually search the connection as the packet destination
-  // is unknown (it corresponds to one of the pivot interfaces souce addresses)
-  HASH_ITER(hh, tun->conn_table, cur, tmp) {
-    if((cur->tuple.ipproto == IPPROTO_ICMP)
-        && (cur->tuple.dst_ip == ip_header->saddr)
-        && (cur->tuple.echo_id == data->un.echo.id)) {
-      conn = cur;
-      break;
-    }
-  }
+  debug("ICMP.re[len=%d] id=%d seq=%d type=%d code=%d", icmp_len, data->un.echo.id,
+          data->un.echo.sequence, data->type, data->code);
 
-  if(!conn) {
-    log_packet("ICMP not found");
-    return 0;
-  }
-
-  // update the conn for next iterations
   conn->tstamp = time(NULL);
-  conn->icmp.echo_seq = 0;
 
   data->checksum = 0;
   data->checksum = htons(~in_cksum((char*)data, icmp_len, 0));
 
-  build_ip_header_raw(payload_ptr, l3_len, IPPROTO_ICMP, conn->tuple.dst_ip, conn->tuple.src_ip);
+  build_ip_header(conn, tun->reply_buf, icmp_len, IPPROTO_ICMP);
 
+  struct iphdr *ip_header = ((struct iphdr*)tun->reply_buf);
   ip_header->check = 0;
-  ip_header->check = ip_checksum(ip_header, ip_header_size);
+  ip_header->check = ip_checksum(ip_header, ZDTUN_IP_HEADER_SIZE);
 
-  return send_to_client(tun, conn, l3_len);
+  return send_to_client(tun, conn, icmp_len + ZDTUN_IP_HEADER_SIZE);
 }
-
-#endif
 
 /* ******************************************************* */
 
@@ -1219,13 +1186,6 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
   int num_hits = 0;
   zdtun_conn_t *conn, *tmp;
 
-#ifndef ZDTUN_SKIP_ICMP
-  if(FD_ISSET(tun->icmp_socket, rd_fds)) {
-    handle_icmp_reply(tun);
-    num_hits++;
-  }
-#endif
-
   HASH_ITER(hh, tun->conn_table, conn, tmp) {
     uint8_t ipproto = conn->tuple.ipproto;
     int rv = 0;
@@ -1238,6 +1198,8 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
         rv = handle_tcp_reply(tun, conn);
       else if(ipproto == IPPROTO_UDP)
         rv = handle_udp_reply(tun, conn);
+      else if(ipproto == IPPROTO_ICMP)
+        rv = handle_icmp_reply(tun, conn);
       else
         error("Unhandled socket.rd proto: %d", ipproto);
 

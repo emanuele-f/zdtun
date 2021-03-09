@@ -182,10 +182,7 @@ typedef PACK_ON struct zdtun_5tuple {
     u_int16_t echo_id;
   };
 
-  union {
-    u_int16_t dst_port;
-    u_int16_t echo_seq;
-  };
+  u_int16_t dst_port;
 
   u_int8_t ipproto;
 } PACK_OFF zdtun_5tuple_t;
