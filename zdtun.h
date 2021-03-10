@@ -435,11 +435,21 @@ int zdtun_send_oob(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn);
  */
 zdtun_conn_t* zdtun_lookup(zdtun_t *tun, const zdtun_5tuple_t *tuple, uint8_t create);
 
+/*
+ * Converts an IP protocol into a string.
+ *
+ * @param ipproto the protocol ID to convert
+ *
+ * @return the protocol string or "unknown".
+ */
+const char* zdtun_proto2str(int ipproto);
+
 /* Connection methods */
 void* zdtun_conn_get_userdata(const zdtun_conn_t *conn);
 void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata);
 int zdtun_conn_dnat(zdtun_conn_t *conn, uint32_t dest_ip, uint16_t dest_port);
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
 time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);
+char* zdtun_tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize);
 
 #endif

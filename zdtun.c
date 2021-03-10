@@ -1299,3 +1299,37 @@ int zdtun_get_num_connections(zdtun_t *tun) {
 void zdtun_get_stats(zdtun_t *tun, zdtun_statistics_t *stats) {
   *stats = tun->stats;
 }
+
+/* ******************************************************* */
+
+const char* zdtun_proto2str(int ipproto) {
+  switch (ipproto) {
+    case IPPROTO_TCP:
+        return "TCP";
+    case IPPROTO_UDP:
+        return "UDP";
+    case IPPROTO_ICMP:
+        return "ICMP";
+    default:
+        return "Unknown";
+  }
+}
+
+/* ******************************************************* */
+
+char* zdtun_tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize) {
+    char srcip[64], dstip[64];
+    struct in_addr addr;
+
+    addr.s_addr = tuple->src_ip;
+    strncpy(srcip, inet_ntoa(addr), sizeof(srcip));
+    addr.s_addr = tuple->dst_ip;
+    strncpy(dstip, inet_ntoa(addr), sizeof(dstip));
+
+    snprintf(buf, bufsize, "[%s] %s:%u -> %s:%u",
+             zdtun_proto2str(tuple->ipproto),
+             srcip, ntohs(tuple->src_port),
+             dstip, ntohs(tuple->dst_port));
+
+    return buf;
+}

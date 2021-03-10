@@ -25,7 +25,6 @@
 #include <arpa/inet.h>
 
 #include <sys/select.h>
-#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
@@ -33,57 +32,18 @@
 #include <netinet/udp.h>
 #include <netinet/tcp.h>
 
-#include <linux/if.h>
-#include <linux/if_tun.h>
-
 #include "zdtun.h"
 #include "utils.h"
 
 #define TUN1_DEV "tun10"
-
-#define TUN_MTU 1500
 #define PACKET_BUFSIZE 65535
 
 /* ******************************************************* */
 
-int tun1_fd, tun2_fd;
+int tun1_fd;
 
 socket_t server_sock = 0;
 u_int32_t tun_ip_addr = 0;
-
-/* ******************************************************* */
-
-static int open_tun(const char *tun_dev, const char*ip, const char *netmask) {
-  struct ifreq ifr;
-  char cmd_buf[255];
-  int tun_fd;
-
-  tun_fd = open("/dev/net/tun", O_RDWR);
-
-  if(tun_fd < 0)
-    fatal("Cannot open TUN device[%d]: %s", errno, strerror(errno));
-
-  memset(&ifr, 0, sizeof(ifr));
-  ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-  strncpy(ifr.ifr_name, tun_dev, IFNAMSIZ);
-
-  int rc = ioctl(tun_fd, TUNSETIFF, (void *)&ifr);
-
-  if(rc < 0)
-    fatal("ioctl failed[%d]: %s", rc, strerror(errno));
-
-  // set IPv4 address
-  snprintf(cmd_buf, sizeof(cmd_buf), "/sbin/ip addr add %s/%s dev %s", ip, netmask, tun_dev);
-  debug("CMD: %s", cmd_buf);
-  system(cmd_buf);
-
-  // bring device upaddr add dev %s %s/ netmask %s mtu %d up
-  snprintf(cmd_buf, sizeof(cmd_buf), "/sbin/ip link set dev %s mtu %d up", tun_dev, TUN_MTU);
-  debug("CMD: %s", cmd_buf);
-  system(cmd_buf);
-
-  return tun_fd;
-}
 
 /* ******************************************************* */
 

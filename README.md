@@ -146,6 +146,12 @@ are not "secure". They just show how to integrate the zdtun API to
 communicate over an existing channel. It's your job to provide and secure such
 a channel.
 
+## Run Local Gateway
+
+The `zdtun_gateway` is a program which routes all the local/internet connections
+through zdtun via a TUN device. It can be useful to easily test the zdtun
+functionalities locally.
+
 ## How It Works
 
 The pivot host running Zero Dep Tunnel keeps track of the client connections and opens sockets on demand toward the private network.

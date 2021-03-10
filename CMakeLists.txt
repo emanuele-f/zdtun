@@ -20,6 +20,12 @@ else()
 
   add_executable(zdtun_pivot zdtun_pivot.c)
   add_executable(zdtun_client zdtun_client.c utils.c)
+
+  if(NOT WIN32)
+    add_executable(zdtun_gateway zdtun_gateway.c)
+    TARGET_LINK_LIBRARIES(zdtun_gateway zdtun_dbg)
+  endif()
+
   TARGET_LINK_LIBRARIES(zdtun_pivot zdtun_dbg)
 
   set_target_properties(zdtun PROPERTIES COMPILE_FLAGS -DNO_DEBUG)

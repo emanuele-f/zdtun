@@ -46,5 +46,8 @@ u_int16_t tcp_checksum(const void *buff, int len, u_int32_t src_addr, u_int32_t 
 u_int16_t ip_checksum(const void *buf, int hdr_len);
 char* ipv4str(u_int32_t addr, char *buf);
 void xor_encdec(char *data, int data_len, char *key);
+int open_tun(const char *tun_dev, const char*ip, const char *netmask);
+void cmd(const char *fmt, ...);
+u_int32_t get_default_gw();
 
 #endif
