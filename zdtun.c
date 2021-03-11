@@ -85,6 +85,10 @@ typedef struct zdtun_conn {
     struct tcp_pending_data *pending;
   } tcp;
 
+  struct {
+    u_int8_t pending_queries;
+  } dns;
+
   void *user_data;
   UT_hash_handle hh;  // tuple -> conn
 } zdtun_conn_t;
@@ -527,6 +531,50 @@ static int process_pending_tcp_packets(zdtun_t *tun, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
+static void check_dns_request(zdtun_conn_t *conn, char *l4_payload, uint16_t l4_len) {
+  struct dns_packet *dns;
+
+  if((l4_len < sizeof(struct dns_packet)) || (conn->tuple.dst_port != ntohs(53)))
+    return;
+
+  dns = (struct dns_packet*)l4_payload;
+
+  if((dns->flags & DNS_FLAGS_MASK) == DNS_TYPE_REQUEST)
+    conn->dns.pending_queries++;
+}
+
+/* ******************************************************* */
+
+static int check_dns_purge(zdtun_t *tun, zdtun_conn_t *conn,
+        char *l4_payload, uint16_t l4_len) {
+    struct dns_packet *dns;
+
+    if((l4_len < sizeof(struct dns_packet)) || (conn->tuple.dst_port != ntohs(53)))
+      return(1);
+
+    dns = (struct dns_packet*)l4_payload;
+
+    if(((dns->flags & DNS_FLAGS_MASK) == DNS_TYPE_RESPONSE)
+        && (conn->dns.pending_queries > 0)) {
+      conn->dns.pending_queries--;
+
+      if(conn->dns.pending_queries == 0) {
+        char buf[256];
+
+        /* DNS responses received, can now purge the conn */
+        debug("DNS purge: %s", zdtun_tuple2str(&conn->tuple, buf, sizeof(buf)));
+        close_conn(tun, conn);
+
+        /* purged */
+        return(0);
+      }
+    }
+
+    return(1);
+}
+
+/* ******************************************************* */
+
 int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
   char *pkt_buf = (char *)_pkt_buf; /* needed to set the zdtun_pkt_t pointers */
   struct iphdr *ip_header = (struct iphdr*) pkt_buf;
@@ -793,6 +841,8 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
     close_conn(tun, conn);
     return -1;
   }
+
+  check_dns_request(conn, pkt->l7, pkt->l7_len);
 
   return 0;
 }
@@ -1071,29 +1121,6 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     return -1;
 
   return 0;
-}
-
-/* ******************************************************* */
-
-static int check_dns_purge(zdtun_t *tun, zdtun_conn_t *conn,
-        char *l4_payload, uint16_t l4_len) {
-    struct dns_packet *dns;
-
-    if((l4_len < sizeof(struct dns_packet)) || (conn->tuple.dst_port != ntohs(53)))
-      return(1);
-
-    dns = (struct dns_packet*)l4_payload;
-
-    if((dns->flags & DNS_FLAGS_MASK) == DNS_TYPE_RESPONSE) {
-      /* DNS response received, can now purge the conn */
-      debug("DNS purge");
-      close_conn(tun, conn);
-
-      /* purged */
-      return(0);
-    }
-
-    return(1);
 }
 
 /* ******************************************************* */

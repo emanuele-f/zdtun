@@ -171,8 +171,6 @@ static void setup_zdtun_routing() {
   // Setup the new gateway table. It will also match local networks.
   cmd("ip route add default via " TUN_GATEWAY_IP " table " RT_TUN_GW_TABLE);
   cmd("ip rule add pref " RT_TUN_GW_RULE " table " RT_TUN_GW_TABLE);
-
-  printf("[!] Remember to enable NAT: 'iptables -t nat -A POSTROUTING -j MASQUERADE'\n");
 }
 
 /* ******************************************************* */
