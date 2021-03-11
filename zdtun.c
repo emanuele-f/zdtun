@@ -808,6 +808,9 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       if(socket_errno == socket_con_reset) {
         debug("TCP connection reset");
         rv = 0;
+      } else if(socket_errno == socket_broken_pipe) {
+        debug("TCP broken pipe");
+        rv = 0;
       } else {
         error("TCP send error[%d]", socket_errno);
         rv = -1;

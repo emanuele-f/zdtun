@@ -113,6 +113,7 @@ typedef SOCKET socket_t;
 #define socket_con_refused (WSAECONNREFUSED)
 #define socket_con_reset (WSAECONNRESET)
 #define socket_con_aborted (WSAECONNABORTED)
+#define socket_broken_pipe (WSAEPIPE)
 #define SHUT_WR SD_SEND
 
 #else
@@ -127,6 +128,7 @@ typedef SOCKET socket_t;
 #define socket_con_refused (ECONNREFUSED)
 #define socket_con_reset (ECONNRESET)
 #define socket_con_aborted (ECONNABORTED)
+#define socket_broken_pipe (EPIPE)
 typedef int socket_t;
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
