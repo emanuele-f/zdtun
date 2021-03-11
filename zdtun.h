@@ -113,6 +113,7 @@ typedef SOCKET socket_t;
 #define socket_con_refused (WSAECONNREFUSED)
 #define socket_con_reset (WSAECONNRESET)
 #define socket_con_aborted (WSAECONNABORTED)
+#define SHUT_WR SD_SEND
 
 #else
 
@@ -223,6 +224,13 @@ typedef struct zdtun_pkt {
   /* L7 pointer */
   char *l7;
 } zdtun_pkt_t;
+
+typedef enum {
+  CONN_STATUS_NEW = 0,
+  CONN_STATUS_CONNECTING,
+  CONN_STATUS_CONNECTED,
+  CONN_STATUS_CLOSED,
+} zdtun_conn_status_t;
 
 /*
  * @brief A connections iterator.
@@ -444,12 +452,22 @@ zdtun_conn_t* zdtun_lookup(zdtun_t *tun, const zdtun_5tuple_t *tuple, uint8_t cr
  */
 const char* zdtun_proto2str(int ipproto);
 
+/*
+ * Converts a connection status into string.
+ *
+ * @param status the status to convert
+ *
+ * @return the status string
+ */
+const char* zdtun_conn_status2str(zdtun_conn_status_t status);
+
 /* Connection methods */
 void* zdtun_conn_get_userdata(const zdtun_conn_t *conn);
 void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata);
 int zdtun_conn_dnat(zdtun_conn_t *conn, uint32_t dest_ip, uint16_t dest_port);
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
 time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);
+zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn);
 char* zdtun_tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize);
 
 #endif

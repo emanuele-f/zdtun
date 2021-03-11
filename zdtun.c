@@ -52,15 +52,6 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn);
 
 /* ******************************************************* */
 
-typedef enum {
-  CONN_STATUS_NEW = 0,
-  CONN_STATUS_CONNECTING,
-  CONN_STATUS_CONNECTED,
-  CONN_STATUS_CLOSED,
-} conn_status_t;
-
-/* ******************************************************* */
-
 struct tcp_pending_data {
   char *data;
   int size;
@@ -71,7 +62,7 @@ typedef struct zdtun_conn {
   zdtun_5tuple_t tuple;
   time_t tstamp;
   socket_t sock;
-  conn_status_t status;
+  zdtun_conn_status_t status;
 
   /* NAT information */
   u_int32_t dnat_ip;
@@ -232,6 +223,10 @@ time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn) {
     return conn->tstamp;
 }
 
+zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn) {
+  return conn->status;
+}
+
 /* ******************************************************* */
 
 zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
@@ -297,8 +292,9 @@ static inline int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int size) {
 
 /* ******************************************************* */
 
-static inline int build_ip_header_raw(char *pkt_buf, u_int16_t tot_len, uint l3_proto, u_int32_t srcip, u_int32_t dstip) {
+static inline int build_reply_ip(zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len, uint l3_proto) {
   struct iphdr *ip_header = (struct iphdr*)pkt_buf;
+  uint16_t tot_len = l3_len + ZDTUN_IP_HEADER_SIZE;
 
   memset(ip_header, 0, 20);
   ip_header->ihl = 5; // 5 * 4 = 20 = ZDTUN_IP_HEADER_SIZE
@@ -307,18 +303,15 @@ static inline int build_ip_header_raw(char *pkt_buf, u_int16_t tot_len, uint l3_
   ip_header->tot_len = htons(tot_len);
   ip_header->ttl = 64; // hops
   ip_header->protocol = l3_proto;
-  ip_header->saddr = srcip;
-  ip_header->daddr = dstip;
+  ip_header->saddr = conn->tuple.dst_ip;
+  ip_header->daddr = conn->tuple.src_ip;
 
   return 0;
 }
 
 /* ******************************************************* */
 
-#define build_ip_header(conn, pkt_buf, l3_len, l3_proto)\
-  build_ip_header_raw(pkt_buf, l3_len + ZDTUN_IP_HEADER_SIZE, l3_proto, conn->tuple.dst_ip, conn->tuple.src_ip)
-
-static inline void build_tcp_ip_header(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags, u_int16_t l4_len) {
+static inline void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags, u_int16_t l4_len) {
   const u_int16_t l3_len = l4_len + MIN_TCP_HEADER_LEN;
   struct tcphdr *tcp_synack = (struct tcphdr *)&tun->reply_buf[ZDTUN_IP_HEADER_SIZE];
   memset(tcp_synack, 0, MIN_TCP_HEADER_LEN);
@@ -330,7 +323,7 @@ static inline void build_tcp_ip_header(zdtun_t *tun, zdtun_conn_t *conn, u_int8_
   tcp_synack->th_flags = flags;
   tcp_synack->th_win = htons(tun->max_window_size);
 
-  build_ip_header(conn, tun->reply_buf, l3_len, IPPROTO_TCP);
+  build_reply_ip(conn, tun->reply_buf, l3_len, IPPROTO_TCP);
   struct iphdr *ip_header = (struct iphdr*) tun->reply_buf;
 
   // TCP checksum (no data)
@@ -371,7 +364,7 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn) {
   if((conn->tuple.ipproto == IPPROTO_TCP)
       && !conn->tcp.fin_ack_sent) {
     // Send TCP RST
-    build_tcp_ip_header(tun, conn, TH_RST | TH_ACK, 0);
+    build_reply_tcpip(tun, conn, TH_RST | TH_ACK, 0);
     send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
   }
 
@@ -427,7 +420,7 @@ static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
   conn->status = CONN_STATUS_CONNECTED;
 
   // send the SYN+ACK
-  build_tcp_ip_header(tun, conn, TH_SYN | TH_ACK, 0);
+  build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0);
 
   if((rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE)) == 0)
     conn->tcp.zdtun_seq += 1;
@@ -438,7 +431,7 @@ static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
 /* ******************************************************* */
 
 static void tcp_socket_fin_ack(zdtun_t *tun, zdtun_conn_t *conn) {
-  build_tcp_ip_header(tun, conn, TH_FIN | TH_ACK, 0);
+  build_reply_tcpip(tun, conn, TH_FIN | TH_ACK, 0);
 
   if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) == 0)
     conn->tcp.zdtun_seq += 1;
@@ -504,7 +497,7 @@ static int process_pending_tcp_packets(zdtun_t *tun, zdtun_conn_t *conn) {
   memcpy(tun->reply_buf + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE, &pending->data[pending->sofar], to_send);
 
   // proxy back the TCP port and reconstruct the TCP header
-  build_tcp_ip_header(tun, conn, TH_PUSH | TH_ACK, to_send);
+  build_reply_tcpip(tun, conn, TH_PUSH | TH_ACK, to_send);
 
   if(send_to_client(tun, conn, to_send + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) != 0) {
     log_tcp_window("[%d][Window size: %d] failed", conn->tuple.src_port, conn->tcp.window_size);
@@ -748,9 +741,18 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   } else if((data->th_flags & (TH_FIN | TH_ACK)) == (TH_FIN | TH_ACK)) {
     debug("Got TCP FIN+ACK from client");
 
+    if(conn->sock != INVALID_SOCKET) {
+      // Half close the socket to possibly signal the remote server
+      // (e.g. in after an HTTP request is completed).
+
+      if(shutdown(conn->sock, SHUT_WR) != 0)
+        debug("shutdown failed[%d] %s", errno, strerror(errno));
+    }
+
     conn->tcp.client_seq += pkt->l7_len + 1;
 
-    build_tcp_ip_header(tun, conn, TH_ACK, 0);
+    // send the ACK
+    build_reply_tcpip(tun, conn, TH_ACK, 0);
     return send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
   } else if(conn->sock == INVALID_SOCKET) {
     debug("Ignore write on closed socket");
@@ -795,7 +797,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     if(!no_ack) {
       // send the ACK
       conn->tcp.client_seq += pkt->l7_len;
-      build_tcp_ip_header(tun, conn, TH_ACK, 0);
+      build_reply_tcpip(tun, conn, TH_ACK, 0);
 
       return send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
     }
@@ -1024,7 +1026,7 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   data->checksum = 0;
   data->checksum = htons(~in_cksum((char*)data, icmp_len, 0));
 
-  build_ip_header(conn, tun->reply_buf, icmp_len, IPPROTO_ICMP);
+  build_reply_ip(conn, tun->reply_buf, icmp_len, IPPROTO_ICMP);
 
   struct iphdr *ip_header = ((struct iphdr*)tun->reply_buf);
   ip_header->check = 0;
@@ -1112,7 +1114,7 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   }
 
   // NAT back the TCP port and reconstruct the TCP header
-  build_tcp_ip_header(tun, conn, TH_PUSH | TH_ACK, l4_len);
+  build_reply_tcpip(tun, conn, TH_PUSH | TH_ACK, l4_len);
 
   if(send_to_client(tun, conn, l4_len + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) == 0) {
     conn->tcp.zdtun_seq += l4_len;
@@ -1162,7 +1164,7 @@ static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   )))));
 #endif
 
-  build_ip_header(conn, tun->reply_buf, l3_len, IPPROTO_UDP);
+  build_reply_ip(conn, tun->reply_buf, l3_len, IPPROTO_UDP);
 
   struct iphdr *ip_header = (struct iphdr*)tun->reply_buf;
   ip_header->check = 0;
@@ -1318,7 +1320,7 @@ int zdtun_iter_connections(zdtun_t *tun, zdtun_conn_iterator_t iterator, void *u
 /* ******************************************************* */
 
 int zdtun_get_num_connections(zdtun_t *tun) {
-    return(tun->stats.num_tcp_conn + tun->stats.num_udp_conn + tun->stats.num_icmp_conn);
+  return(tun->stats.num_tcp_conn + tun->stats.num_udp_conn + tun->stats.num_icmp_conn);
 }
 
 /* ******************************************************* */
@@ -1359,4 +1361,21 @@ char* zdtun_tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize) {
              dstip, ntohs(tuple->dst_port));
 
     return buf;
+}
+
+/* ******************************************************* */
+
+const char* zdtun_conn_status2str(zdtun_conn_status_t status) {
+  switch(status) {
+    case CONN_STATUS_NEW:
+      return "NEW";
+    case CONN_STATUS_CONNECTING:
+      return "CONNECTING";
+    case CONN_STATUS_CONNECTED:
+      return "CONNECTED";
+    case CONN_STATUS_CLOSED:
+      return "CLOSED";
+  }
+
+  return "UNKNOWN";
 }

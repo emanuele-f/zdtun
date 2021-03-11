@@ -134,6 +134,21 @@ static int handle_new_connection(zdtun_t *tun, zdtun_conn_t *conn_info) {
 
 /* ******************************************************* */
 
+static int print_conn_iterator(zdtun_t *tun, const zdtun_conn_t *conn_info, void *userdata) {
+  char buf[256];
+
+  zdtun_tuple2str(zdtun_conn_get_5tuple(conn_info), buf, sizeof(buf));
+
+  printf("%s [%s] - %lu sec ago\n", buf,
+    zdtun_conn_status2str(zdtun_conn_get_status(conn_info)),
+    time(NULL) - zdtun_conn_get_last_seen(conn_info));
+
+  // continue
+  return 0;
+}
+
+/* ******************************************************* */
+
 static void protect_socket(zdtun_t *tun, socket_t sock) {
   uint mark = FWMARK_ORIG_GW;
 
@@ -254,6 +269,10 @@ int main(int argc, char **argv) {
       last_purge = time(NULL);
     }
   }
+
+  // print still active connections
+  printf("\nActive connections:\n");
+  zdtun_iter_connections(tun, print_conn_iterator, NULL);
 
   // cleanup
   cleanup_zdtun_routing();
