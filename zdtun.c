@@ -555,7 +555,7 @@ static int check_dns_purge(zdtun_t *tun, zdtun_conn_t *conn,
         char buf[256];
 
         /* DNS responses received, can now purge the conn */
-        debug("DNS purge: %s", zdtun_tuple2str(&conn->tuple, buf, sizeof(buf)));
+        debug("DNS purge: %s", zdtun_5tuple2str(&conn->tuple, buf, sizeof(buf)));
         close_conn(tun, conn);
 
         /* purged */
@@ -766,21 +766,38 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   }
 
   if(data->th_flags & TH_ACK) {
-    // Received ACK from the client, update the window. Take into account
-    // the in flight bytes which the client has not ACK-ed yet.
-    uint32_t ack_num = ntohl(data->th_ack);
-    uint32_t in_flight;
+    if((uint32_t)(ntohl(data->th_seq) + 1) == conn->tcp.client_seq) {
+      debug("TCP KEEPALIVE");
 
-    if(conn->tcp.zdtun_seq >= ack_num)
-      in_flight = conn->tcp.zdtun_seq - ack_num;
-    else
-      // TCP seq wrapped
-      in_flight = 0xFFFFFFFF - ack_num + conn->tcp.zdtun_seq + 1;
+      if(conn->sock != INVALID_SOCKET) {
+        int val = 1;
 
-    conn->tcp.window_size = min(ntohs(data->th_win), tun->max_window_size) - in_flight;
+        if(setsockopt(conn->sock, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) != 0)
+          error("setsockopt SO_KEEPALIVE failed[%d]: %s", errno, strerror(errno));
 
-    if(process_pending_tcp_packets(tun, conn) != 0)
-      return -1;
+        // Assume that the server is alive until its socket is closed.
+        build_reply_tcpip(tun, conn, TH_ACK, 0);
+
+        if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) != 0)
+          return -1;
+      }
+    } else {
+      // Received ACK from the client, update the window. Take into account
+      // the in flight bytes which the client has not ACK-ed yet.
+      uint32_t ack_num = ntohl(data->th_ack);
+      uint32_t in_flight;
+
+      if(conn->tcp.zdtun_seq >= ack_num)
+        in_flight = conn->tcp.zdtun_seq - ack_num;
+      else
+        // TCP seq wrapped
+        in_flight = 0xFFFFFFFF - ack_num + conn->tcp.zdtun_seq + 1;
+
+      conn->tcp.window_size = min(ntohs(data->th_win), tun->max_window_size) - in_flight;
+
+      if(process_pending_tcp_packets(tun, conn) != 0)
+        return -1;
+    }
   }
 
   // payload data (avoid sending ACK to an ACK)
@@ -1352,7 +1369,7 @@ const char* zdtun_proto2str(int ipproto) {
 
 /* ******************************************************* */
 
-char* zdtun_tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize) {
+char* zdtun_5tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize) {
     char srcip[64], dstip[64];
     struct in_addr addr;
 

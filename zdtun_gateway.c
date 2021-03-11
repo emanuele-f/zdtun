@@ -124,7 +124,7 @@ static zdtun_conn_t* data_out(zdtun_t *tun, const char *pkt_buf, int pkt_len) {
 static int handle_new_connection(zdtun_t *tun, zdtun_conn_t *conn_info) {
   char buf[256];
 
-  zdtun_tuple2str(zdtun_conn_get_5tuple(conn_info), buf, sizeof(buf));
+  zdtun_5tuple2str(zdtun_conn_get_5tuple(conn_info), buf, sizeof(buf));
 
   printf("[+] %s\n", buf);
 
@@ -137,7 +137,7 @@ static int handle_new_connection(zdtun_t *tun, zdtun_conn_t *conn_info) {
 static int print_conn_iterator(zdtun_t *tun, const zdtun_conn_t *conn_info, void *userdata) {
   char buf[256];
 
-  zdtun_tuple2str(zdtun_conn_get_5tuple(conn_info), buf, sizeof(buf));
+  zdtun_5tuple2str(zdtun_conn_get_5tuple(conn_info), buf, sizeof(buf));
 
   printf("%s [%s] - %lu sec ago\n", buf,
     zdtun_conn_status2str(zdtun_conn_get_status(conn_info)),

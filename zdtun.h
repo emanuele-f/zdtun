@@ -470,6 +470,6 @@ int zdtun_conn_dnat(zdtun_conn_t *conn, uint32_t dest_ip, uint16_t dest_port);
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
 time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);
 zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn);
-char* zdtun_tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize);
+char* zdtun_5tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize);
 
 #endif
