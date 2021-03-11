@@ -120,6 +120,8 @@ typedef SOCKET socket_t;
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <unistd.h>
+#define SOL_TCP 6
+#define TCP_NODELAY 1
 #define socket_errno (errno)
 #define socket_in_progress (EINPROGRESS)
 #define socket_con_refused (ECONNREFUSED)

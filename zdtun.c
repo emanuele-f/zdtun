@@ -667,6 +667,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
           zdtun_conn_t *conn, uint8_t no_ack) {
   char buf1[INET_ADDRSTRLEN], buf2[INET_ADDRSTRLEN];
   struct tcphdr *data = pkt->tcp;
+  int val;
 
   debug("[TCP]-> %s:%d -> %s:%d",
     ipv4str(conn->tuple.src_ip, buf1), ntohs(conn->tuple.src_port),
@@ -683,6 +684,11 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       error("Cannot create TCP socket[%d]", socket_errno);
       return -1;
     }
+
+    // Enable TCP_NODELAY to avoid slowing down the connection
+    val = 1;
+    if(setsockopt(tcp_sock, SOL_TCP, TCP_NODELAY, &val, sizeof(val)) < 0)
+      error("setsockopt TCP_NODELAY failed");
 
     // Setup for the connection
     struct sockaddr_in servaddr = {0};
