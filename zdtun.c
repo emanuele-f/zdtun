@@ -73,6 +73,7 @@ typedef struct zdtun_conn {
     u_int32_t zdtun_seq;     // next proxy sequence number
     u_int16_t window_size;   // client window size
     bool fin_ack_sent;
+    bool client_closed;
     struct tcp_pending_data *pending;
   } tcp;
 
@@ -745,6 +746,8 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
     return 0;
   } else if((data->th_flags & (TH_FIN | TH_ACK)) == (TH_FIN | TH_ACK)) {
+    int rv;
+
     debug("Got TCP FIN+ACK from client");
 
     if(conn->sock != INVALID_SOCKET) {
@@ -756,10 +759,17 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     }
 
     conn->tcp.client_seq += pkt->l7_len + 1;
+    conn->tcp.client_closed = true;
 
     // send the ACK
     build_reply_tcpip(tun, conn, TH_ACK, 0);
-    return send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
+    rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
+
+    if(conn->sock == INVALID_SOCKET)
+      // Both the client and the server have closed, terminate the connection
+      close_conn(tun, conn);
+
+    return rv;
   } else if(conn->sock == INVALID_SOCKET) {
     debug("Ignore write on closed socket");
     return 0;
@@ -1103,6 +1113,10 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     // The client communication can still go on (e.g. client sending ACK to FIN+ACK)
     close_socket(tun, conn->sock);
     conn->sock = INVALID_SOCKET;
+
+    if(conn->tcp.client_closed)
+      // Both the client and the server have closed, terminate the connection
+      close_conn(tun, conn);
 
     return 0;
   }
