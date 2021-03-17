@@ -5,6 +5,9 @@
 //#include <netinet/tcp.h>
 //#include <linux/ipv6.h>
 
+#ifndef __NET_HEADERS_H__
+#define __NET_HEADERS_H__
+
 #ifdef WIN32
 
 #define IPPROTO_ICMP            1
@@ -128,3 +131,5 @@ struct ip6_ext {
   uint8_t  ip6e_nxt;		/* next header.  */
   uint8_t  ip6e_len;		/* length in units of 8 octets.  */
 };
+
+#endif
