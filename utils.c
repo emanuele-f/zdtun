@@ -266,7 +266,7 @@ u_int16_t in_cksum(const char *buf, int nbytes, u_int32_t sum) {
   return sum;
 }
 
-static inline u_int16_t wrapsum(u_int32_t sum) {
+u_int16_t wrapsum(u_int32_t sum) {
   sum = ~sum & 0xFFFF;
   return htons(sum);
 }

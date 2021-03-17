@@ -3,12 +3,14 @@
 //#include <netinet/ip_icmp.h>
 //#include <netinet/udp.h>
 //#include <netinet/tcp.h>
+//#include <linux/ipv6.h>
 
 #ifdef WIN32
 
 #define IPPROTO_ICMP            1
 #define IPPROTO_TCP             6
 #define IPPROTO_UDP             17
+#define IPPROTO_ICMPV6          58
 
 #endif  
 
@@ -38,6 +40,8 @@ struct iphdr
 
 #define ICMP_ECHOREPLY          0
 #define ICMP_ECHO               8
+#define ICMPv6_ECHO             128
+#define ICMPv6_ECHOREPLY        129
 
 PACK_ON
 struct icmphdr
@@ -99,3 +103,28 @@ struct tcphdr
   uint16_t th_sum;        /* checksum */
   uint16_t th_urp;        /* urgent pointer */
 } PACK_OFF;
+
+struct ipv6hdr {
+#if defined(_LITTLE_ENDIAN)
+  uint8_t priority:4;
+  uint8_t version:4;
+#elif defined(_BIG_ENDIAN)
+  uint8_t version:4;
+  uint8_t priority:4;
+#else
+#error "Please fix endianess"
+#endif
+  uint8_t flow_lbl[3];
+
+  uint16_t payload_len;
+  uint8_t nexthdr;
+  uint8_t hop_limit;
+
+  struct in6_addr saddr;
+  struct in6_addr daddr;
+};
+
+struct ip6_ext {
+  uint8_t  ip6e_nxt;		/* next header.  */
+  uint8_t  ip6e_len;		/* length in units of 8 octets.  */
+};

@@ -35,7 +35,6 @@
 
 /* DEBUG OPTIONS */
 //#define SHOW_DEBUG
-//#define SHOW_PACKETS_LOG
 //#define SHOW_TCP_WINDOW_LOG
 
 /* ********************************* */
@@ -46,11 +45,6 @@
 #define debug(...) {}
 #endif
 
-#ifdef SHOW_PACKETS_LOG
-#define log_packet(...) { log(__VA_ARGS__); }
-#else
-#define log_packet(...) {}
-#endif
 
 #ifdef SHOW_TCP_WINDOW_LOG
 #define log_tcp_window(...) { log(__VA_ARGS__); }
@@ -81,8 +75,6 @@
 #endif
 
 #define fatal(...) { error(__VA_ARGS__); exit(1); }
-
-#define ZDTUN_IP_HEADER_SIZE 20
 
 #ifdef WIN32
 #include <stdint.h>
@@ -177,10 +169,15 @@ typedef struct zdtun_statistics {
   int all_max_fd;                       ///< select nfds value
 } zdtun_statistics_t;
 
+typedef union zdtun_ip {
+  u_int32_t ip4;
+  struct in6_addr ip6;
+} zdtun_ip_t;
+
 // packed - to be used with uthash
 typedef PACK_ON struct zdtun_5tuple {
-  u_int32_t src_ip;
-  u_int32_t dst_ip;
+  zdtun_ip_t src_ip;
+  zdtun_ip_t dst_ip;
 
   union {
     u_int16_t src_port;
@@ -189,6 +186,7 @@ typedef PACK_ON struct zdtun_5tuple {
 
   u_int16_t dst_port;
 
+  u_int8_t ipver;
   u_int8_t ipproto;
 } PACK_OFF zdtun_5tuple_t;
 
@@ -468,7 +466,7 @@ const char* zdtun_conn_status2str(zdtun_conn_status_t status);
 /* Connection methods */
 void* zdtun_conn_get_userdata(const zdtun_conn_t *conn);
 void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata);
-int zdtun_conn_dnat(zdtun_conn_t *conn, uint32_t dest_ip, uint16_t dest_port);
+int zdtun_conn_dnat(zdtun_conn_t *conn, const zdtun_ip_t *dest_ip, uint16_t dest_port);
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
 time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);
 zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn);

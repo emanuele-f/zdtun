@@ -29,6 +29,8 @@
 #define REPLY_BUF_SIZE 65535
 #define TCP_WINDOW_SIZE 64240
 #define MIN_TCP_HEADER_LEN 20
+#define IPV4_HEADER_LEN 20
+#define IPV6_HEADER_LEN 40
 #define UDP_HEADER_LEN 8
 
 #define ICMP_TIMEOUT_SEC 5
@@ -58,15 +60,17 @@ struct tcp_pending_data {
   int sofar;
 };
 
+typedef struct zdtun_dnat {
+  zdtun_ip_t ip;
+  u_int16_t port;
+} zdtun_dnat_t;
+
 typedef struct zdtun_conn {
   zdtun_5tuple_t tuple;
   time_t tstamp;
   socket_t sock;
   zdtun_conn_status_t status;
-
-  /* NAT information */
-  u_int32_t dnat_ip;
-  u_int16_t dnat_port;
+  zdtun_dnat_t *dnat;
 
   struct {
     u_int32_t client_seq;    // next client sequence number
@@ -103,14 +107,14 @@ typedef struct zdtun_t {
 /* ******************************************************* */
 
 struct dns_packet {
-    uint16_t transaction_id;
-    uint16_t flags;
-    uint16_t questions;
-    uint16_t answ_rrs;
-    uint16_t auth_rrs;
-    uint16_t additional_rrs;
-    uint8_t initial_dot; // just skip
-    uint8_t queries[];
+  uint16_t transaction_id;
+  uint16_t flags;
+  uint16_t questions;
+  uint16_t answ_rrs;
+  uint16_t auth_rrs;
+  uint16_t additional_rrs;
+  uint8_t initial_dot; // just skip
+  uint8_t queries[];
 } __attribute__((packed));
 
 #define DNS_FLAGS_MASK 0x8000
@@ -210,9 +214,22 @@ void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata) {
   conn->user_data = userdata;
 }
 
-int zdtun_conn_dnat(zdtun_conn_t *conn, uint32_t dest_ip, uint16_t dest_port) {
-  conn->dnat_ip = dest_ip;
-  conn->dnat_port = dest_port;
+int zdtun_conn_dnat(zdtun_conn_t *conn, const zdtun_ip_t *dest_ip, uint16_t dest_port) {
+  zdtun_dnat_t *dnat = (zdtun_dnat_t*) malloc(sizeof(zdtun_dnat_t));
+
+  if(dnat == NULL) {
+    error("malloc(zdtun_dnat_t) failed");
+    return -1;
+  }
+
+  dnat->ip = *dest_ip;
+  dnat->port = dest_port;
+
+  if(conn->dnat)
+    free(conn->dnat);
+
+  conn->dnat = dnat;
+
   return 0;
 }
 
@@ -273,7 +290,8 @@ void ztdun_finalize(zdtun_t *tun) {
 
 /* ******************************************************* */
 
-static inline int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int size) {
+static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
+  int size = l3_len + ((conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN);
   int rv = tun->callbacks.send_client(tun, tun->reply_buf, size, conn);
 
   if(rv == 0) {
@@ -293,54 +311,76 @@ static inline int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int size) {
 
 /* ******************************************************* */
 
-static inline int build_reply_ip(zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len, uint l3_proto) {
-  struct iphdr *ip_header = (struct iphdr*)pkt_buf;
-  uint16_t tot_len = l3_len + ZDTUN_IP_HEADER_SIZE;
+static void build_reply_ip(zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len) {
+  if(conn->tuple.ipver == 4) {
+    struct iphdr *ip = (struct iphdr*)pkt_buf;
+    uint16_t tot_len = l3_len + IPV4_HEADER_LEN;
 
-  memset(ip_header, 0, 20);
-  ip_header->ihl = 5; // 5 * 4 = 20 = ZDTUN_IP_HEADER_SIZE
-  ip_header->version = 4;
-  ip_header->frag_off = htons(0x4000); // don't fragment
-  ip_header->tot_len = htons(tot_len);
-  ip_header->ttl = 64; // hops
-  ip_header->protocol = l3_proto;
-  ip_header->saddr = conn->tuple.dst_ip;
-  ip_header->daddr = conn->tuple.src_ip;
+    memset(ip, 0, IPV4_HEADER_LEN);
+    ip->ihl = 5; // 5 * 4 = 20 = IPV4_HEADER_LEN
+    ip->version = 4;
+    ip->frag_off = htons(0x4000); // don't fragment
+    ip->tot_len = htons(tot_len);
+    ip->ttl = 64; // hops
+    ip->protocol = conn->tuple.ipproto;
+    ip->saddr = conn->tuple.dst_ip.ip4;
+    ip->daddr = conn->tuple.src_ip.ip4;
+  } else {
+    struct ipv6hdr *ip = (struct ipv6hdr*)pkt_buf;
 
-  return 0;
+    memset(ip, 0, IPV6_HEADER_LEN);
+    ip->version = 6;
+    ip->payload_len = htons(l3_len);
+    ip->nexthdr = (conn->tuple.ipproto != IPPROTO_ICMP) ? conn->tuple.ipproto : IPPROTO_ICMPV6;
+    ip->hop_limit = 64;
+    ip->saddr = conn->tuple.dst_ip.ip6;
+    ip->daddr = conn->tuple.src_ip.ip6;
+  }
 }
 
 /* ******************************************************* */
 
-static inline void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags, u_int16_t l4_len) {
+static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags, u_int16_t l4_len) {
+  int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
   const u_int16_t l3_len = l4_len + MIN_TCP_HEADER_LEN;
-  struct tcphdr *tcp_synack = (struct tcphdr *)&tun->reply_buf[ZDTUN_IP_HEADER_SIZE];
-  memset(tcp_synack, 0, MIN_TCP_HEADER_LEN);
-  tcp_synack->th_sport = conn->tuple.dst_port;
-  tcp_synack->th_dport = conn->tuple.src_port;
-  tcp_synack->th_seq = htonl(conn->tcp.zdtun_seq);
-  tcp_synack->th_ack = (flags & TH_ACK) ? htonl(conn->tcp.client_seq) : 0;
-  tcp_synack->th_off = 5;
-  tcp_synack->th_flags = flags;
-  tcp_synack->th_win = htons(tun->max_window_size);
+  struct tcphdr *tcp = (struct tcphdr *)&tun->reply_buf[iphdr_len];
 
-  build_reply_ip(conn, tun->reply_buf, l3_len, IPPROTO_TCP);
-  struct iphdr *ip_header = (struct iphdr*) tun->reply_buf;
+  memset(tcp, 0, MIN_TCP_HEADER_LEN);
+  tcp->th_sport = conn->tuple.dst_port;
+  tcp->th_dport = conn->tuple.src_port;
+  tcp->th_seq = htonl(conn->tcp.zdtun_seq);
+  tcp->th_ack = (flags & TH_ACK) ? htonl(conn->tcp.client_seq) : 0;
+  tcp->th_off = 5;
+  tcp->th_flags = flags;
+  tcp->th_win = htons(tun->max_window_size);
 
-  // TCP checksum (no data)
-  tcp_synack->th_sum = 0;
+  build_reply_ip(conn, tun->reply_buf, l3_len);
+
+  if(conn->tuple.ipver == 4) {
+    struct iphdr *ip_header = (struct iphdr*)tun->reply_buf;
+
+    // TCP checksum (no data)
+    tcp->th_sum = 0;
 #if 0
-  tcp_synack->th_sum = wrapsum(in_cksum((char*)tcp_synack, MIN_TCP_HEADER_LEN, // TCP header
-    in_cksum((char*)&ip_header->saddr, 8,      // Source + Dest IP
-        IPPROTO_TCP + l3_len                   // Protocol + TCP Total Length
-  )));
+    tcp->th_sum = wrapsum(in_cksum((char*)tcp, MIN_TCP_HEADER_LEN, // TCP header
+      in_cksum((char*)&ip_header->saddr, 8,      // Source + Dest IP
+          IPPROTO_TCP + l3_len                   // Protocol + TCP Total Length
+    )));
 #else
-  // this is more efficient then the multiple in_cksum
-  tcp_synack->th_sum = tcp_checksum(tcp_synack, l3_len, ip_header->saddr, ip_header->daddr);
+    // this is more efficient then the multiple in_cksum
+    tcp->th_sum = tcp_checksum(tcp, l3_len, ip_header->saddr, ip_header->daddr);
 #endif
 
-  ip_header->check = 0;
-  ip_header->check = ip_checksum(ip_header, ZDTUN_IP_HEADER_SIZE);
+    ip_header->check = 0;
+    ip_header->check = ip_checksum(ip_header, IPV4_HEADER_LEN);
+  } else {
+    struct ipv6hdr *ip_header = (struct ipv6hdr*)tun->reply_buf;
+
+    tcp->th_sum = wrapsum(in_cksum((char*)tcp, MIN_TCP_HEADER_LEN, // TCP header
+      in_cksum((char*)&ip_header->saddr, 32,     // Source + Dest IP
+          IPPROTO_TCP + l3_len                   // Protocol + TCP Total Length
+    )));
+  }
 }
 
 /* ******************************************************* */
@@ -366,7 +406,7 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn) {
       && !conn->tcp.fin_ack_sent) {
     // Send TCP RST
     build_reply_tcpip(tun, conn, TH_RST | TH_ACK, 0);
-    send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
+    send_to_client(tun, conn, MIN_TCP_HEADER_LEN);
   }
 
   if(tun->callbacks.on_connection_close)
@@ -396,6 +436,9 @@ void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
       break;
   }
 
+  if(conn->dnat)
+    free(conn->dnat);
+
   HASH_DELETE(hh, tun->conn_table, conn);
   free(conn);
 }
@@ -423,7 +466,7 @@ static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
   // send the SYN+ACK
   build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0);
 
-  if((rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE)) == 0)
+  if((rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN)) == 0)
     conn->tcp.zdtun_seq += 1;
 
   return rv;
@@ -434,7 +477,7 @@ static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
 static void tcp_socket_fin_ack(zdtun_t *tun, zdtun_conn_t *conn) {
   build_reply_tcpip(tun, conn, TH_FIN | TH_ACK, 0);
 
-  if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) == 0)
+  if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN) == 0)
     conn->tcp.zdtun_seq += 1;
 }
 
@@ -487,6 +530,7 @@ zdtun_conn_t* zdtun_lookup(zdtun_t *tun, const zdtun_5tuple_t *tuple, uint8_t cr
 
 static int process_pending_tcp_packets(zdtun_t *tun, zdtun_conn_t *conn) {
   struct tcp_pending_data *pending = conn->tcp.pending;
+  int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
 
   if(!conn->tcp.window_size || !pending || (conn->sock == INVALID_SOCKET))
     return 0;
@@ -495,12 +539,12 @@ static int process_pending_tcp_packets(zdtun_t *tun, zdtun_conn_t *conn) {
   int to_send = min(conn->tcp.window_size, remaining);
 
   log_tcp_window("[%d][Window size: %d] Sending %d/%d bytes pending data", conn->tuple.src_port, conn->tcp.window_size, to_send, remaining);
-  memcpy(tun->reply_buf + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE, &pending->data[pending->sofar], to_send);
+  memcpy(tun->reply_buf + MIN_TCP_HEADER_LEN + iphdr_len, &pending->data[pending->sofar], to_send);
 
   // proxy back the TCP port and reconstruct the TCP header
   build_reply_tcpip(tun, conn, TH_PUSH | TH_ACK, to_send);
 
-  if(send_to_client(tun, conn, to_send + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) != 0) {
+  if(send_to_client(tun, conn, to_send + MIN_TCP_HEADER_LEN) != 0) {
     log_tcp_window("[%d][Window size: %d] failed", conn->tuple.src_port, conn->tcp.window_size);
     return -1;
   }
@@ -569,44 +613,87 @@ static int check_dns_purge(zdtun_t *tun, zdtun_conn_t *conn,
 
 /* ******************************************************* */
 
-int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
-  char *pkt_buf = (char *)_pkt_buf; /* needed to set the zdtun_pkt_t pointers */
-  struct iphdr *ip_header = (struct iphdr*) pkt_buf;
-  int ip_hdr_len;
+static int is_upper_layer(int proto) {
+  return (proto == IPPROTO_TCP ||
+          proto == IPPROTO_UDP ||
+          proto == IPPROTO_ICMP ||
+          proto == IPPROTO_ICMPV6);
+}
 
-  if(ip_header->version != 4) {
-    debug("Ignoring non IPv4 packet: %d", ip_header->version);
+/* ******************************************************* */
+
+int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
+  if(pkt_len < 20) {
+    debug("Ignoring non IP packet (len: %d)", pkt_len);
     return -1;
   }
 
-  ip_hdr_len = ip_header->ihl * 4;
+  memset(pkt, 0, sizeof(zdtun_pkt_t));
 
-  if(pkt_len < ip_hdr_len) {
-    debug("Malformed IP packet");
+  char *pkt_buf = (char *)_pkt_buf; /* needed to set the zdtun_pkt_t pointers */
+  uint8_t ipver = (*pkt_buf) >> 4;
+  uint8_t ipproto;
+  int iphdr_len;
+
+  if((ipver != 4) && (ipver != 6)) {
+    debug("Ignoring non IP packet (len: %d, v: %d)", pkt_len, ipver);
     return -1;
+  }
+
+  if(ipver == 4) {
+    struct iphdr *ip_header = (struct iphdr*) pkt_buf;
+    iphdr_len = ip_header->ihl * 4;
+
+    if(pkt_len < iphdr_len) {
+      debug("IPv4 packet too short: %d bytes", pkt_len);
+      return -1;
+    }
+
+    pkt->tuple.src_ip.ip4 = ip_header->saddr;
+    pkt->tuple.dst_ip.ip4 = ip_header->daddr;
+    ipproto = ip_header->protocol;
+  } else {
+    struct ipv6hdr *ip_header = (struct ipv6hdr*) pkt_buf;
+
+    if(pkt_len < sizeof(struct ipv6hdr)) {
+      debug("IPv6 packet too short: %d bytes", pkt_len);
+      return -1;
+    }
+
+    iphdr_len = sizeof(struct ipv6hdr);
+
+    if(!is_upper_layer(ip_header->nexthdr)) {
+      debug("IPv6 extensions not supported: %d", ip_header->nexthdr);
+      return -1;
+    }
+
+    pkt->tuple.src_ip.ip6 = ip_header->saddr;
+    pkt->tuple.dst_ip.ip6 = ip_header->daddr;
+
+    // Treat IPPROTO_ICMPV6 as IPPROTO_ICMP for simplicity
+    ipproto = (ip_header->nexthdr != IPPROTO_ICMPV6) ? ip_header->nexthdr : IPPROTO_ICMP;
   }
 
   pkt->buf = pkt_buf;
   pkt->l3 = pkt_buf;
-  pkt->tuple.src_ip = ip_header->saddr;
-  pkt->tuple.dst_ip = ip_header->daddr;
-  pkt->tuple.ipproto = ip_header->protocol;
+  pkt->tuple.ipproto = ipproto;
+  pkt->tuple.ipver = ipver;
   pkt->pkt_len = pkt_len;
-  pkt->ip_hdr_len = ip_hdr_len;
-  pkt->l4 = &pkt_buf[ip_hdr_len];
+  pkt->ip_hdr_len = iphdr_len;
+  pkt->l4 = &pkt_buf[iphdr_len];
 
-  if(ip_header->protocol == IPPROTO_TCP) {
+  if(ipproto == IPPROTO_TCP) {
     struct tcphdr *data = pkt->tcp;
     int32_t tcp_header_len;
 
-    if(pkt_len < (ip_hdr_len + MIN_TCP_HEADER_LEN)) {
+    if(pkt_len < (iphdr_len + MIN_TCP_HEADER_LEN)) {
       debug("Packet too small for TCP[%d]", pkt_len);
       return -1;
     }
 
     tcp_header_len = data->th_off * 4;
 
-    if(pkt_len < (ip_hdr_len + tcp_header_len)) {
+    if(pkt_len < (iphdr_len + tcp_header_len)) {
       debug("Malformed TCP packet");
       return -1;
     }
@@ -614,10 +701,10 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
     pkt->l4_hdr_len = tcp_header_len;
     pkt->tuple.src_port = data->th_sport;
     pkt->tuple.dst_port = data->th_dport;
-  } else if(ip_header->protocol == IPPROTO_UDP) {
+  } else if(ipproto == IPPROTO_UDP) {
     struct udphdr *data = pkt->udp;
 
-    if(pkt_len < (ip_hdr_len + UDP_HEADER_LEN)) {
+    if(pkt_len < (iphdr_len + UDP_HEADER_LEN)) {
       debug("Packet too small for UDP[%d]", pkt_len);
       return -1;
     }
@@ -625,16 +712,16 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
     pkt->l4_hdr_len = 8;
     pkt->tuple.src_port = data->uh_sport;
     pkt->tuple.dst_port = data->uh_dport;
-  } else if(ip_header->protocol == IPPROTO_ICMP) {
-    struct icmphdr *data = (struct icmphdr*) &pkt_buf[ip_hdr_len];
+  } else if(ipproto == IPPROTO_ICMP) {
+    struct icmphdr *data = (struct icmphdr*) &pkt_buf[iphdr_len];
 
-    if(pkt_len < (ip_hdr_len + sizeof(struct icmphdr))) {
+    if(pkt_len < (iphdr_len + sizeof(struct icmphdr))) {
       debug("Packet too small for ICMP");
       return -1;
     }
 
     if((data->type != ICMP_ECHO) && (data->type != ICMP_ECHOREPLY)) {
-      log_packet("Discarding unsupported ICMP[%d]", data->type);
+      debug("Discarding unsupported ICMP[%d]", data->type);
       return -2;
     }
 
@@ -642,12 +729,12 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
     pkt->tuple.echo_id = data->un.echo.id;
     pkt->tuple.dst_port = 0;
   } else {
-    debug("Packet with unknown protocol: %u", ip_header->protocol);
+    debug("Packet with unknown protocol: %u", ipproto);
     return -3;
   }
 
-  pkt->l7_len = pkt_len - ip_hdr_len - pkt->l4_hdr_len;
-  pkt->l7 = &pkt_buf[ip_hdr_len + pkt->l4_hdr_len];
+  pkt->l7_len = pkt_len - iphdr_len - pkt->l4_hdr_len;
+  pkt->l7 = &pkt_buf[iphdr_len + pkt->l4_hdr_len];
   return 0;
 }
 
@@ -659,6 +746,26 @@ void zdtun_set_max_window_size(zdtun_t *tun, int max_len) {
 
 /* ******************************************************* */
 
+static void fill_conn_sockaddr(zdtun_conn_t *conn,
+        struct sockaddr_in6 *addr6, socklen_t *addrlen) {
+  if(conn->tuple.ipver == 4) {
+    // struct sockaddr_in is smaller than struct sockaddr_in6
+    struct sockaddr_in *addr4 = (struct sockaddr_in*)addr6;
+
+    addr4->sin_family = AF_INET;
+    addr4->sin_addr.s_addr = conn->dnat ? conn->dnat->ip.ip4 : conn->tuple.dst_ip.ip4;
+    addr4->sin_port = conn->dnat ? conn->dnat->port : conn->tuple.dst_port;
+    *addrlen = sizeof(struct sockaddr_in);
+  } else {
+    addr6->sin6_family = AF_INET6;
+    addr6->sin6_addr = conn->dnat ? conn->dnat->ip.ip6 : conn->tuple.dst_ip.ip6;
+    addr6->sin6_port = conn->dnat ? conn->dnat->port : conn->tuple.dst_port;
+    *addrlen = sizeof(struct sockaddr_in6);
+  }
+}
+
+/* ******************************************************* */
+
 // returns 0 on success
 // returns <0 on error
 // no_ack: can be used to avoid sending the ACK to the client and keep
@@ -666,20 +773,16 @@ void zdtun_set_max_window_size(zdtun_t *tun, int max_len) {
 // data.
 static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
           zdtun_conn_t *conn, uint8_t no_ack) {
-  char buf1[INET_ADDRSTRLEN], buf2[INET_ADDRSTRLEN];
   struct tcphdr *data = pkt->tcp;
+  int family = (conn->tuple.ipver == 4) ? PF_INET : PF_INET6;
   int val;
-
-  debug("[TCP]-> %s:%d -> %s:%d",
-    ipv4str(conn->tuple.src_ip, buf1), ntohs(conn->tuple.src_port),
-    ipv4str(conn->tuple.dst_ip, buf2), ntohs(conn->tuple.dst_port));
 
   if(conn->status == CONN_STATUS_CONNECTING) {
     debug("ignore TCP packet, we are connecting");
     return 0;
   } else if(conn->status == CONN_STATUS_NEW) {
     debug("Allocating new TCP socket for port %d", ntohs(conn->tuple.dst_port));
-    socket_t tcp_sock = open_socket(tun, PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    socket_t tcp_sock = open_socket(tun, family, SOCK_STREAM, IPPROTO_TCP);
 
     if(tcp_sock == INVALID_SOCKET) {
       error("Cannot create TCP socket[%d]", socket_errno);
@@ -692,10 +795,9 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       error("setsockopt TCP_NODELAY failed");
 
     // Setup for the connection
-    struct sockaddr_in servaddr = {0};
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_addr.s_addr =  conn->dnat_ip ? conn->dnat_ip : conn->tuple.dst_ip;
-    servaddr.sin_port = conn->dnat_port ? conn->dnat_port : conn->tuple.dst_port;
+    struct sockaddr_in6 servaddr = {0};
+    socklen_t addrlen;
+    fill_conn_sockaddr(conn, &servaddr, &addrlen);
 
 #ifdef WIN32
     unsigned nonblocking = 1;
@@ -710,7 +812,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     bool in_progress = false;
 
     // connect with the server
-    if(connect(tcp_sock, (struct sockaddr *) &servaddr, sizeof(struct sockaddr_in)) == SOCKET_ERROR) {
+    if(connect(tcp_sock, (struct sockaddr *) &servaddr, addrlen) == SOCKET_ERROR) {
       if(socket_errno == socket_in_progress) {
         debug("Connection in progress");
         in_progress = true;
@@ -763,7 +865,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
     // send the ACK
     build_reply_tcpip(tun, conn, TH_ACK, 0);
-    rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
+    rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN);
 
     if(conn->sock == INVALID_SOCKET)
       // Both the client and the server have closed, terminate the connection
@@ -788,7 +890,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
         // Assume that the server is alive until its socket is closed.
         build_reply_tcpip(tun, conn, TH_ACK, 0);
 
-        if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) != 0)
+        if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN) != 0)
           return -1;
       }
     } else {
@@ -835,7 +937,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       conn->tcp.client_seq += pkt->l7_len;
       build_reply_tcpip(tun, conn, TH_ACK, 0);
 
-      return send_to_client(tun, conn, MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE);
+      return send_to_client(tun, conn, MIN_TCP_HEADER_LEN);
     }
   }
 
@@ -846,15 +948,10 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
 static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
   struct udphdr *data = pkt->udp;
-
-  char buf1[INET_ADDRSTRLEN], buf2[INET_ADDRSTRLEN];
-
-  debug("[UDP]-> %s:%d -> %s:%d",
-    ipv4str(conn->tuple.src_ip, buf1), ntohs(conn->tuple.src_port),
-    ipv4str(conn->tuple.dst_ip, buf2), ntohs(conn->tuple.dst_port));
+  int family = (conn->tuple.ipver == 4) ? PF_INET : PF_INET6;
 
   if(conn->status == CONN_STATUS_NEW) {
-    socket_t udp_sock = open_socket(tun, PF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    socket_t udp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_UDP);
     debug("Allocating new UDP socket for port %d", ntohs(data->uh_sport));
 
     if(udp_sock == INVALID_SOCKET) {
@@ -869,12 +966,11 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
   if(tun->callbacks.account_packet)
     tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
 
-  struct sockaddr_in servaddr = {0};
-  servaddr.sin_family = AF_INET;
-  servaddr.sin_addr.s_addr = conn->dnat_ip ? conn->dnat_ip : conn->tuple.dst_ip;
-  servaddr.sin_port = conn->dnat_port ? conn->dnat_port : conn->tuple.dst_port;
+  struct sockaddr_in6 servaddr = {0};
+  socklen_t addrlen;
+  fill_conn_sockaddr(conn, &servaddr, &addrlen);
 
-  if(sendto(conn->sock, pkt->l7, pkt->l7_len, 0, (struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
+  if(sendto(conn->sock, pkt->l7, pkt->l7_len, 0, (struct sockaddr*)&servaddr, addrlen) < 0) {
     error("UDP sendto error[%d]", socket_errno);
     close_conn(tun, conn);
     return -1;
@@ -890,8 +986,10 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
 /* NOTE: a collision may occure between ICMP packets seq from host and tunneled packets, we ignore it */
 static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
   struct icmphdr *data = pkt->icmp;
-  char buf1[INET_ADDRSTRLEN], buf2[INET_ADDRSTRLEN];
   const uint16_t icmp_len = pkt->l4_hdr_len + pkt->l7_len;
+
+  // NOTE: PF_INET6 is not currently supported by SOCK_DGRAM ICMP
+  int family = (conn->tuple.ipver == 4) ? PF_INET : PF_INET6;
 
   if(conn->status == CONN_STATUS_NEW) {
     /*
@@ -904,7 +1002,7 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
      *  - The reply received via recv misses the IP header.
      *  - Does not honor all the ICMP header fields (e.g. the ICMP echo ID).
      */
-    socket_t icmp_sock = open_socket(tun, PF_INET, SOCK_DGRAM, IPPROTO_ICMP);
+    socket_t icmp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_ICMP);
     debug("Allocating new ICMP socket for id %d", ntohs(data->un.echo.id));
 
     if(icmp_sock == INVALID_SOCKET) {
@@ -917,19 +1015,17 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
     conn->tuple.src_port = data->un.echo.id;
   }
 
-  debug("[ICMP.fw] %s -> %s", ipv4str(conn->tuple.src_ip, buf1),
-    ipv4str(conn->tuple.dst_ip, buf2));
   debug("ICMP.fw[len=%u] id=%d seq=%d type=%d code=%d", icmp_len, data->un.echo.id,
           data->un.echo.sequence, data->type, data->code);
 
   if(tun->callbacks.account_packet)
     tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
 
-  struct sockaddr_in servaddr = {0};
-  servaddr.sin_family = AF_INET;
-  servaddr.sin_addr.s_addr = conn->dnat_ip ? conn->dnat_ip : conn->tuple.dst_ip;
+  struct sockaddr_in6 servaddr = {0};
+  socklen_t addrlen;
+  fill_conn_sockaddr(conn, &servaddr, &addrlen);
 
-  if(sendto(conn->sock, data, icmp_len, 0, (struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
+  if(sendto(conn->sock, data, icmp_len, 0, (struct sockaddr*)&servaddr, addrlen) < 0) {
     error("ICMP sendto error[%d]", socket_errno);
     close_conn(tun, conn);
     return -1;
@@ -1024,8 +1120,9 @@ zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, int pkt_len)
 /* ******************************************************* */
 
 static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
-  int icmp_len = recv(conn->sock, tun->reply_buf + ZDTUN_IP_HEADER_SIZE,
-          REPLY_BUF_SIZE - ZDTUN_IP_HEADER_SIZE, 0);
+  int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+  int icmp_len = recv(conn->sock, tun->reply_buf + iphdr_len,
+          REPLY_BUF_SIZE - iphdr_len, 0);
 
   if(icmp_len == SOCKET_ERROR) {
     error("Error reading ICMP packet[%d]: %d", icmp_len, socket_errno);
@@ -1039,20 +1136,16 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     return -1;
   }
 
-  struct icmphdr *data = (struct icmphdr*) &tun->reply_buf[ZDTUN_IP_HEADER_SIZE];
-  char buf1[INET_ADDRSTRLEN], buf2[INET_ADDRSTRLEN];
+  struct icmphdr *data = (struct icmphdr*) &tun->reply_buf[iphdr_len];
 
   if((data->type != ICMP_ECHO) && (data->type != ICMP_ECHOREPLY)) {
-    log_packet("Discarding unsupported ICMP[%d]", data->type);
+    debug("Discarding unsupported ICMP[%d]", data->type);
     close_conn(tun, conn);
     return 0;
   }
 
   // Reset the correct ID (the kernel changes it)
   data->un.echo.id = conn->tuple.echo_id;
-
-  debug("[ICMP.re]-> %s -> %s", ipv4str(conn->tuple.dst_ip, buf1),
-          ipv4str(conn->tuple.src_ip, buf2));
 
   debug("ICMP.re[len=%d] id=%d seq=%d type=%d code=%d", icmp_len, data->un.echo.id,
           data->un.echo.sequence, data->type, data->code);
@@ -1062,20 +1155,23 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   data->checksum = 0;
   data->checksum = htons(~in_cksum((char*)data, icmp_len, 0));
 
-  build_reply_ip(conn, tun->reply_buf, icmp_len, IPPROTO_ICMP);
+  build_reply_ip(conn, tun->reply_buf, icmp_len);
 
-  struct iphdr *ip_header = ((struct iphdr*)tun->reply_buf);
-  ip_header->check = 0;
-  ip_header->check = ip_checksum(ip_header, ZDTUN_IP_HEADER_SIZE);
+  if(conn->tuple.ipver == 4) {
+    struct iphdr *ip_header = (struct iphdr*)tun->reply_buf;
+    ip_header->check = 0;
+    ip_header->check = ip_checksum(ip_header, IPV4_HEADER_LEN);
+  }
 
-  return send_to_client(tun, conn, icmp_len + ZDTUN_IP_HEADER_SIZE);
+  return send_to_client(tun, conn, icmp_len);
 }
 
 /* ******************************************************* */
 
 static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
-  char *payload_ptr = tun->reply_buf + ZDTUN_IP_HEADER_SIZE + MIN_TCP_HEADER_LEN;
-  int l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE - ZDTUN_IP_HEADER_SIZE - MIN_TCP_HEADER_LEN, 0);
+  int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+  char *payload_ptr = tun->reply_buf + iphdr_len + MIN_TCP_HEADER_LEN;
+  int l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE - iphdr_len - MIN_TCP_HEADER_LEN, 0);
 
   conn->tstamp = time(NULL);
 
@@ -1121,10 +1217,6 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     return 0;
   }
 
-  char buf1[INET_ADDRSTRLEN], buf2[INET_ADDRSTRLEN];
-  debug("[TCP] %s:%d -> %s:%d", ipv4str(conn->tuple.dst_ip, buf1), ntohs(conn->tuple.dst_port),
-            ipv4str(conn->tuple.src_ip, buf2), ntohs(conn->tuple.src_port));
-
   if((conn->tcp.pending) || (conn->tcp.window_size < l4_len)) {
     log_tcp_window("[%d] Insufficient window size detected [window=%d, l4=%d, pending=%d], queuing",
         conn->tuple.src_port, conn->tcp.window_size, l4_len, (conn->tcp.pending ? conn->tcp.pending->size : 0));
@@ -1156,7 +1248,7 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   // NAT back the TCP port and reconstruct the TCP header
   build_reply_tcpip(tun, conn, TH_PUSH | TH_ACK, l4_len);
 
-  if(send_to_client(tun, conn, l4_len + MIN_TCP_HEADER_LEN + ZDTUN_IP_HEADER_SIZE) == 0) {
+  if(send_to_client(tun, conn, l4_len + MIN_TCP_HEADER_LEN) == 0) {
     conn->tcp.zdtun_seq += l4_len;
     conn->tcp.window_size -= l4_len;
   } else
@@ -1168,8 +1260,9 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 /* ******************************************************* */
 
 static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
-  char *payload_ptr = tun->reply_buf + ZDTUN_IP_HEADER_SIZE + sizeof(struct udphdr);
-  int l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE-ZDTUN_IP_HEADER_SIZE-sizeof(struct udphdr), 0);
+  int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+  char *payload_ptr = tun->reply_buf + iphdr_len + sizeof(struct udphdr);
+  int l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE-iphdr_len-sizeof(struct udphdr), 0);
 
   if(l4_len == SOCKET_ERROR) {
     error("Error reading UDP packet[%d]: %d", l4_len, socket_errno);
@@ -1179,17 +1272,12 @@ static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
   // Reconstruct the UDP header
   int l3_len = l4_len + sizeof(struct udphdr);
-  struct udphdr *data = (struct udphdr*) (tun->reply_buf + ZDTUN_IP_HEADER_SIZE);
+  struct udphdr *data = (struct udphdr*) (tun->reply_buf + iphdr_len);
   data->uh_ulen = htons(l3_len);
   data->uh_sport = conn->tuple.dst_port;
 
   // NAT back the UDP port
   data->uh_dport = conn->tuple.src_port;
-
-  char buf1[INET_ADDRSTRLEN], buf2[INET_ADDRSTRLEN];
-
-  log_packet("[UDP] %s:%d -> %s:%d", ipv4str(conn->tuple.dst_ip, buf1), ntohs(conn->tuple.dst_port),
-            ipv4str(conn->tuple.src_ip, buf2), ntohs(conn->tuple.src_port));
 
   // Recalculate the checksum
   data->uh_sum = 0;
@@ -1204,13 +1292,15 @@ static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   )))));
 #endif
 
-  build_reply_ip(conn, tun->reply_buf, l3_len, IPPROTO_UDP);
+  build_reply_ip(conn, tun->reply_buf, l3_len);
 
-  struct iphdr *ip_header = (struct iphdr*)tun->reply_buf;
-  ip_header->check = 0;
-  ip_header->check = ip_checksum(ip_header, ZDTUN_IP_HEADER_SIZE);
+  if(conn->tuple.ipver == 4) {
+    struct iphdr *ip_header = (struct iphdr*)tun->reply_buf;
+    ip_header->check = 0;
+    ip_header->check = ip_checksum(ip_header, IPV4_HEADER_LEN);
+  }
 
-  int rv = send_to_client(tun, conn, l3_len + ZDTUN_IP_HEADER_SIZE);
+  int rv = send_to_client(tun, conn, l3_len);
 
   if(rv == 0) {
     // ok
@@ -1387,16 +1477,16 @@ const char* zdtun_proto2str(int ipproto) {
 /* ******************************************************* */
 
 char* zdtun_5tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize) {
-    char srcip[64], dstip[64];
-    struct in_addr addr;
+    char srcip[INET6_ADDRSTRLEN];
+    char dstip[INET6_ADDRSTRLEN];
+    int family = (tuple->ipver == 4) ? AF_INET : AF_INET6;
 
-    addr.s_addr = tuple->src_ip;
-    strncpy(srcip, inet_ntoa(addr), sizeof(srcip));
-    addr.s_addr = tuple->dst_ip;
-    strncpy(dstip, inet_ntoa(addr), sizeof(dstip));
+    inet_ntop(family, &tuple->src_ip, srcip, sizeof(srcip));
+    inet_ntop(family, &tuple->dst_ip, dstip, sizeof(dstip));
 
-    snprintf(buf, bufsize, "[%s] %s:%u -> %s:%u",
+    snprintf(buf, bufsize, "[%s%c] %s:%u -> %s:%u",
              zdtun_proto2str(tuple->ipproto),
+             (tuple->ipver == 4) ? '4' : '6',
              srcip, ntohs(tuple->src_port),
              dstip, ntohs(tuple->dst_port));
 
