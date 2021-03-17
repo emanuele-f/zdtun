@@ -123,6 +123,24 @@ struct dns_packet {
 
 /* ******************************************************* */
 
+struct ippseudo {
+  uint32_t ippseudo_src;    /* source internet address */
+  uint32_t ippseudo_dst;    /* destination internet address */
+  u_int8_t ippseudo_pad;    /* pad, must be zero */
+  u_int8_t ippseudo_p;      /* protocol */
+  u_int16_t ippseudo_len;	  /* protocol length */
+};
+
+struct ip6_hdr_pseudo {
+  struct in6_addr ip6ph_src;
+  struct in6_addr ip6ph_dst;
+  u_int32_t ip6ph_len;
+  u_int8_t ip6ph_zero[3];
+  u_int8_t ip6ph_nxt;
+} __attribute__((packed));
+
+/* ******************************************************* */
+
 void zdtun_fds(zdtun_t *tun, int *max_fd, fd_set *rdfd, fd_set *wrfd) {
   *max_fd = tun->stats.all_max_fd;
   *rdfd = tun->all_fds;
@@ -214,6 +232,7 @@ void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata) {
   conn->user_data = userdata;
 }
 
+// TODO allow DNAT to different IP version
 int zdtun_conn_dnat(zdtun_conn_t *conn, const zdtun_ip_t *dest_ip, uint16_t dest_port) {
   zdtun_dnat_t *dnat = (zdtun_dnat_t*) malloc(sizeof(zdtun_dnat_t));
 
@@ -325,6 +344,8 @@ static void build_reply_ip(zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len) 
     ip->protocol = conn->tuple.ipproto;
     ip->saddr = conn->tuple.dst_ip.ip4;
     ip->daddr = conn->tuple.src_ip.ip4;
+
+    ip->check = ~calc_checksum(0, (u_int8_t*)ip, IPV4_HEADER_LEN);
   } else {
     struct ipv6hdr *ip = (struct ipv6hdr*)pkt_buf;
 
@@ -355,32 +376,31 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags, 
   tcp->th_win = htons(tun->max_window_size);
 
   build_reply_ip(conn, tun->reply_buf, l3_len);
+  tcp->th_sum = calc_checksum(0, (uint8_t*)tcp, l3_len);
 
   if(conn->tuple.ipver == 4) {
     struct iphdr *ip_header = (struct iphdr*)tun->reply_buf;
+    struct ippseudo pseudo = {0};
 
-    // TCP checksum (no data)
-    tcp->th_sum = 0;
-#if 0
-    tcp->th_sum = wrapsum(in_cksum((char*)tcp, MIN_TCP_HEADER_LEN, // TCP header
-      in_cksum((char*)&ip_header->saddr, 8,      // Source + Dest IP
-          IPPROTO_TCP + l3_len                   // Protocol + TCP Total Length
-    )));
-#else
-    // this is more efficient then the multiple in_cksum
-    tcp->th_sum = tcp_checksum(tcp, l3_len, ip_header->saddr, ip_header->daddr);
-#endif
+    pseudo.ippseudo_src = ip_header->saddr;
+    pseudo.ippseudo_dst = ip_header->daddr;
+    pseudo.ippseudo_p = IPPROTO_TCP;
+    pseudo.ippseudo_len = htons(l3_len);
 
-    ip_header->check = 0;
-    ip_header->check = ip_checksum(ip_header, IPV4_HEADER_LEN);
+    tcp->th_sum = calc_checksum(tcp->th_sum, (uint8_t*)&pseudo, sizeof(pseudo));
   } else {
     struct ipv6hdr *ip_header = (struct ipv6hdr*)tun->reply_buf;
+    struct ip6_hdr_pseudo pseudo = {0};
 
-    tcp->th_sum = wrapsum(in_cksum((char*)tcp, MIN_TCP_HEADER_LEN, // TCP header
-      in_cksum((char*)&ip_header->saddr, 32,     // Source + Dest IP
-          IPPROTO_TCP + l3_len                   // Protocol + TCP Total Length
-    )));
+    pseudo.ip6ph_src = ip_header->saddr;
+    pseudo.ip6ph_dst = ip_header->daddr;
+    pseudo.ip6ph_len = ip_header->payload_len;
+    pseudo.ip6ph_nxt = IPPROTO_TCP;
+
+    tcp->th_sum = calc_checksum(tcp->th_sum, (uint8_t*)&pseudo, sizeof(pseudo));
   }
+
+  tcp->th_sum = ~tcp->th_sum;
 }
 
 /* ******************************************************* */
@@ -817,8 +837,9 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
         debug("Connection in progress");
         in_progress = true;
       } else {
-        log("TCP connection error");
+        log("TCP connection error[%d]: %s", errno, strerror(errno));
         close_socket(tun, tcp_sock);
+        close_conn(tun, conn);
         return -1;
       }
     }
@@ -1153,15 +1174,9 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   conn->tstamp = time(NULL);
 
   data->checksum = 0;
-  data->checksum = htons(~in_cksum((char*)data, icmp_len, 0));
+  data->checksum = ~calc_checksum(data->checksum, (u_int8_t*)data, icmp_len);
 
   build_reply_ip(conn, tun->reply_buf, icmp_len);
-
-  if(conn->tuple.ipver == 4) {
-    struct iphdr *ip_header = (struct iphdr*)tun->reply_buf;
-    ip_header->check = 0;
-    ip_header->check = ip_checksum(ip_header, IPV4_HEADER_LEN);
-  }
 
   return send_to_client(tun, conn, icmp_len);
 }
@@ -1279,26 +1294,10 @@ static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   // NAT back the UDP port
   data->uh_dport = conn->tuple.src_port;
 
-  // Recalculate the checksum
+  // NOTE: UDP checksum not calculated, it is optional
   data->uh_sum = 0;
 
-  // NOTE: not needed (UDP checksum is optional) and inefficient
-#if 0
-  data->check = wrapsum(in_cksum((char*)data, sizeof(struct udphdr), // UDP header
-    in_cksum(payload_ptr, l4_len,
-      in_cksum((char*)&conn->tuple.dst_ip, 4,
-        in_cksum((char*)&conn->tuple.src_ip, 4,
-          IPPROTO_UDP + l3_len
-  )))));
-#endif
-
   build_reply_ip(conn, tun->reply_buf, l3_len);
-
-  if(conn->tuple.ipver == 4) {
-    struct iphdr *ip_header = (struct iphdr*)tun->reply_buf;
-    ip_header->check = 0;
-    ip_header->check = ip_checksum(ip_header, IPV4_HEADER_LEN);
-  }
 
   int rv = send_to_client(tun, conn, l3_len);
 

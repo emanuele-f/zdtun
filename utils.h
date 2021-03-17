@@ -41,10 +41,7 @@ socket_t con_wait_connection(con_mode_info *info, struct sockaddr_in *cli_addr);
 void con_send(socket_t sock, char *data, u_int32_t len);
 u_int32_t con_recv(socket_t sock, char *data, u_int32_t len);
 
-u_int16_t wrapsum(u_int32_t sum);
-u_int16_t in_cksum(const char *buf, int nbytes, u_int32_t sum);
-u_int16_t tcp_checksum(const void *buff, int len, u_int32_t src_addr, u_int32_t dest_addr);
-u_int16_t ip_checksum(const void *buf, int hdr_len);
+u_int16_t calc_checksum(u_int16_t start, const u_int8_t *buffer, u_int16_t length);
 char* ipv4str(u_int32_t addr, char *buf);
 void xor_encdec(char *data, int data_len, char *key);
 int open_tun(const char *tun_dev, const char*ip, const char *netmask);

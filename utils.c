@@ -204,75 +204,24 @@ char* ipv4str(u_int32_t addr, char *buf) {
 
 /* ******************************************************* */
 
-// from http://minirighi.sourceforge.net/html/tcp_8c-source.html
-u_int16_t tcp_checksum(const void *buff, int len, u_int32_t src_addr, u_int32_t dest_addr) {
-  const uint16_t *buf=buff;
-  uint16_t *ip_src=(void *)&src_addr, *ip_dst=(void *)&dest_addr;
-  uint32_t sum;
-  int length=len;
+// from netguard
+uint16_t calc_checksum(uint16_t start, const uint8_t *buffer, u_int16_t length) {
+  register uint32_t sum = start;
+  register uint16_t *buf = (uint16_t *) buffer;
+  register uint16_t len = length;
 
-  // Calculate the sum
-  sum = 0;
-  while (len > 1) {
+  while(len > 1) {
     sum += *buf++;
-    if (sum & 0x80000000)
-      sum = (sum & 0xFFFF) + (sum >> 16);
     len -= 2;
   }
 
-  if ( len & 1 )
-    // Add the padding if the packet lenght is odd
-    sum += *((uint8_t *)buf);
+  if(len > 0)
+    sum += *((uint8_t *) buf);
 
-  // Add the pseudo-header
-  sum += *(ip_src++);
-  sum += *ip_src;
-  sum += *(ip_dst++);
-  sum += *ip_dst;
-  sum += htons(IPPROTO_TCP);
-  sum += htons(length);
-
-  // Add the carries
   while (sum >> 16)
     sum = (sum & 0xFFFF) + (sum >> 16);
 
-  // Return the one's complement of sum
-  return ( (uint16_t)(~sum)  );
-}
-
-/* ******************************************************* */
-
-// from DHCPd
-u_int16_t in_cksum(const char *buf, int nbytes, u_int32_t sum) {
-  u_int16_t i;
-
-  /* Checksum all the pairs of bytes first... */
-  for (i = 0; i < (nbytes & ~1U); i += 2) {
-    sum += (u_int16_t) ntohs(*((u_int16_t *)(buf + i)));
-    /* Add carry. */
-    if(sum > 0xFFFF)
-      sum -= 0xFFFF;
-  }
-
-  /* If there's a single byte left over, checksum it, too.   Network
-     byte order is big-endian, so the remaining byte is the high byte. */
-  if(i < nbytes) {
-    sum += buf [i] << 8;
-    /* Add carry. */
-    if(sum > 0xFFFF)
-      sum -= 0xFFFF;
-  }
-
-  return sum;
-}
-
-u_int16_t wrapsum(u_int32_t sum) {
-  sum = ~sum & 0xFFFF;
-  return htons(sum);
-}
-
-u_int16_t ip_checksum(const void *buf, int hdr_len) {
-  return wrapsum(in_cksum(buf, hdr_len, 0));
+  return (uint16_t) sum;
 }
 
 /* ******************************************************* */
