@@ -212,7 +212,8 @@ typedef struct zdtun_pkt {
   /* L3 pointers */
   union {
     char *l3;
-    struct iphdr *ip;
+    struct iphdr *ip4;
+    struct ipv6_hdr *ip6;
   };
 
   /* L4 pointers */
@@ -232,6 +233,7 @@ typedef enum {
   CONN_STATUS_CONNECTING,
   CONN_STATUS_CONNECTED,
   CONN_STATUS_CLOSED,
+  CONN_STATUS_ERROR,
 } zdtun_conn_status_t;
 
 /*
