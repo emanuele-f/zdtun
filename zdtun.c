@@ -347,7 +347,7 @@ static void build_reply_ip(zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len) 
 
     ip->check = ~calc_checksum(0, (u_int8_t*)ip, IPV4_HEADER_LEN);
   } else {
-    struct ipv6hdr *ip = (struct ipv6hdr*)pkt_buf;
+    struct ipv6_hdr *ip = (struct ipv6_hdr*)pkt_buf;
 
     memset(ip, 0, IPV6_HEADER_LEN);
     ip->version = 6;
@@ -389,7 +389,7 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags, 
 
     tcp->th_sum = calc_checksum(tcp->th_sum, (uint8_t*)&pseudo, sizeof(pseudo));
   } else {
-    struct ipv6hdr *ip_header = (struct ipv6hdr*)tun->reply_buf;
+    struct ipv6_hdr *ip_header = (struct ipv6_hdr*)tun->reply_buf;
     struct ip6_hdr_pseudo pseudo = {0};
 
     pseudo.ip6ph_src = ip_header->saddr;
@@ -673,14 +673,14 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
     pkt->tuple.dst_ip.ip4 = ip_header->daddr;
     ipproto = ip_header->protocol;
   } else {
-    struct ipv6hdr *ip_header = (struct ipv6hdr*) pkt_buf;
+    struct ipv6_hdr *ip_header = (struct ipv6_hdr*) pkt_buf;
 
-    if(pkt_len < sizeof(struct ipv6hdr)) {
+    if(pkt_len < sizeof(struct ipv6_hdr)) {
       debug("IPv6 packet too short: %d bytes", pkt_len);
       return -1;
     }
 
-    iphdr_len = sizeof(struct ipv6hdr);
+    iphdr_len = sizeof(struct ipv6_hdr);
 
     if(!is_upper_layer(ip_header->nexthdr)) {
       debug("IPv6 extensions not supported: %d", ip_header->nexthdr);

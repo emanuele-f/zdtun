@@ -107,7 +107,7 @@ struct tcphdr
   uint16_t th_urp;        /* urgent pointer */
 } PACK_OFF;
 
-struct ipv6hdr {
+struct ipv6_hdr {
 #if defined(_LITTLE_ENDIAN)
   uint8_t priority:4;
   uint8_t version:4;
