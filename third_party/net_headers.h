@@ -107,6 +107,7 @@ struct tcphdr
   uint16_t th_urp;        /* urgent pointer */
 } PACK_OFF;
 
+PACK_ON
 struct ipv6_hdr {
 #if defined(_LITTLE_ENDIAN)
   uint8_t priority:4;
@@ -125,11 +126,6 @@ struct ipv6_hdr {
 
   struct in6_addr saddr;
   struct in6_addr daddr;
-};
-
-struct ip6_ext {
-  uint8_t  ip6e_nxt;		/* next header.  */
-  uint8_t  ip6e_len;		/* length in units of 8 octets.  */
-};
+} PACK_OFF;
 
 #endif
