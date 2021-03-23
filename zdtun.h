@@ -106,6 +106,8 @@ typedef SOCKET socket_t;
 #define socket_con_reset (WSAECONNRESET)
 #define socket_con_aborted (WSAECONNABORTED)
 #define socket_broken_pipe (WSAEPIPE)
+#define socket_net_unreachable (WSAENETUNREACH)
+#define socket_host_unreachable (WSAEHOSTUNREACH)
 #define SHUT_WR SD_SEND
 
 #else
@@ -121,6 +123,8 @@ typedef SOCKET socket_t;
 #define socket_con_reset (ECONNRESET)
 #define socket_con_aborted (ECONNABORTED)
 #define socket_broken_pipe (EPIPE)
+#define socket_net_unreachable (ENETUNREACH)
+#define socket_host_unreachable (EHOSTUNREACH)
 typedef int socket_t;
 #define INVALID_SOCKET -1
 #define SOCKET_ERROR -1
@@ -233,7 +237,13 @@ typedef enum {
   CONN_STATUS_CONNECTING,
   CONN_STATUS_CONNECTED,
   CONN_STATUS_CLOSED,
+
+  // Connection Errors
   CONN_STATUS_ERROR,
+  CONN_STATUS_SOCKET_ERROR,
+  CONN_STATUS_CLIENT_ERROR,
+  CONN_STATUS_RESET,
+  CONN_STATUS_UNREACHABLE,
 } zdtun_conn_status_t;
 
 /*
