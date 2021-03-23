@@ -308,6 +308,10 @@ zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn) {
   return conn->status;
 }
 
+socket_t zdtun_conn_get_socket(const zdtun_conn_t *conn) {
+  return conn->sock;
+}
+
 /* ******************************************************* */
 
 zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
