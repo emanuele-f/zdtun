@@ -1006,12 +1006,48 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
   int family = (conn->tuple.ipver == 4) ? PF_INET : PF_INET6;
 
   if(conn->status == CONN_STATUS_NEW) {
-    socket_t udp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_UDP);
     debug("Allocating new UDP socket for port %d", ntohs(data->uh_sport));
+
+    socket_t udp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_UDP);
 
     if(udp_sock == INVALID_SOCKET) {
       error("Cannot create UDP socket[%d]", socket_errno);
       return -1;
+    }
+
+    // Check for broadcasts/multicasts
+    if(conn->tuple.ipver == 4) {
+      if(conn->tuple.dst_ip.ip4 == INADDR_BROADCAST) {
+        int on = 1;
+
+        debug("UDP4 broadcast detected");
+
+        if(setsockopt(udp_sock, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on)))
+          error("UDP setsockopt SO_BROADCAST failed[%d]: %s", errno, strerror(errno));
+      }
+    } else {
+      // Adapted from netguard/udp.c
+      if(conn->tuple.dst_ip.ip6.s6_addr[0] == 0xFF) {
+        debug("UDP6 broadcast detected");
+
+        int loop = 1; // true
+        if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &loop, sizeof(loop)))
+          error("UDP setsockopt IPV6_MULTICAST_LOOP failed[%d]: %s",
+                  errno, strerror(errno));
+
+        int ttl = -1; // route default
+        if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &ttl, sizeof(ttl)))
+          error("UDP setsockopt IPV6_MULTICAST_HOPS failed[%d]: %s",
+                  errno, strerror(errno));
+
+        struct ipv6_mreq mreq6;
+        memcpy(&mreq6.ipv6mr_multiaddr, &conn->tuple.dst_ip.ip6, 16);
+        mreq6.ipv6mr_interface = INADDR_ANY;
+
+        if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &mreq6, sizeof(mreq6)))
+          error("UDP setsockopt IPV6_ADD_MEMBERSHIP failed[%d]: %s",
+                  errno, strerror(errno));
+      }
     }
 
     conn->sock = udp_sock;
