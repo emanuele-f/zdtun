@@ -65,6 +65,7 @@
 
 static int tun_fd;
 static bool running;
+static bool proxy_enabled = false;
 
 /* ******************************************************* */
 
@@ -107,6 +108,9 @@ static zdtun_conn_t* data_out(zdtun_t *tun, const char *pkt_buf, int pkt_len) {
 
     return NULL;
   }
+
+  if(proxy_enabled && (pkt.tuple.ipproto == IPPROTO_TCP))
+    zdtun_conn_proxy(conn);
 
   if(zdtun_forward(tun, &pkt, conn) != 0) {
     error("zdtun_forward failed");
@@ -200,10 +204,24 @@ static void cleanup_zdtun_routing() {
 
 /* ******************************************************* */
 
+static void usage(char **argv) {
+  fprintf(stderr, "Usage: %s [proxy_ip proxy_port]\n"
+    "\n"
+    "Routes all the local/internet traffic via zdtun.\n"
+    "An optional SOCKS5 proxy can be used for TCP connections.\n"
+    "", argv[0]);
+
+  exit(0);
+}
+
+/* ******************************************************* */
+
 int main(int argc, char **argv) {
   char *pkt_buf;
   zdtun_t *tun;
   time_t last_purge;
+  zdtun_ip_t proxy_ip = {0};
+  int proxy_port = 0;
 
   zdtun_callbacks_t callbacks = {
     .send_client = data_in,
@@ -211,8 +229,22 @@ int main(int argc, char **argv) {
     .on_socket_open = protect_socket,
   };
 
-  if(argc != 1)
-    fatal("%s - routes all the local/internet traffic via zdtun", argv[0]);
+  if((argc != 1) && (argc != 3))
+    usage(argv);
+
+  if(argc == 3) {
+    int af = (strchr(argv[1], ':') == NULL) ? AF_INET : AF_INET6;
+
+    if(inet_pton(af, argv[1], ((af == AF_INET) ? (void*)&proxy_ip.ip4 : (void*)&proxy_ip.ip6)) != 1)
+      usage(argv);
+
+    proxy_port = htons(atoi(argv[2]));
+
+    if((proxy_port <= 0) || (proxy_port > 65535))
+      usage(argv);
+
+    proxy_enabled = true;
+  }
 
   if(!(pkt_buf = (char*) malloc(PACKET_BUFSIZE)))
     fatal("Cannot allocate packet buffer");
@@ -222,6 +254,9 @@ int main(int argc, char **argv) {
 
   if(!tun)
     fatal("zdtun_init failed");
+
+  if(proxy_enabled)
+    zdtun_set_socks5_proxy(tun, &proxy_ip, proxy_port);
 
   setup_zdtun_routing();
   signal(SIGPIPE, SIG_IGN);

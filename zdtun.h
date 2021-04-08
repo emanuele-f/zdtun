@@ -244,6 +244,7 @@ typedef enum {
   CONN_STATUS_CLIENT_ERROR,
   CONN_STATUS_RESET,
   CONN_STATUS_UNREACHABLE,
+  CONN_STATUS_SOCKS5_ERROR,
 } zdtun_conn_status_t;
 
 /*
@@ -475,10 +476,17 @@ const char* zdtun_proto2str(int ipproto);
  */
 const char* zdtun_conn_status2str(zdtun_conn_status_t status);
 
+/*
+ * Set a socks5 proxy. Individual connections to proxy must be marked
+ * by calling zdtun_conn_proxy.
+ */
+void zdtun_set_socks5_proxy(zdtun_t *tun, const zdtun_ip_t *proxy_ip, uint16_t proxy_port);
+
 /* Connection methods */
 void* zdtun_conn_get_userdata(const zdtun_conn_t *conn);
 void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata);
 int zdtun_conn_dnat(zdtun_conn_t *conn, const zdtun_ip_t *dest_ip, uint16_t dest_port);
+void zdtun_conn_proxy(zdtun_conn_t *conn);
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
 time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);
 zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn);

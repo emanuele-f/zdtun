@@ -23,6 +23,7 @@
 
 #include "zdtun.h"
 #include "utils.h"
+#include "socks5.h"
 #include "third_party/uthash.h"
 #include "third_party/net_headers.h"
 
@@ -70,6 +71,8 @@ typedef struct zdtun_conn {
   time_t tstamp;
   socket_t sock;
   zdtun_conn_status_t status;
+  uint8_t socks5_status;
+  uint8_t socks5_skip;
   zdtun_dnat_t *dnat;
 
   struct {
@@ -99,6 +102,11 @@ typedef struct zdtun_t {
   int max_window_size;
   zdtun_statistics_t stats;
   char reply_buf[REPLY_BUF_SIZE];
+
+  struct {
+    zdtun_ip_t proxy_ip;
+    uint16_t proxy_port;
+  } socks5;
 
   zdtun_conn_t *sock_2_conn;
   zdtun_conn_t *conn_table;
@@ -267,6 +275,13 @@ void* zdtun_userdata(zdtun_t *tun) {
 
 /* ******************************************************* */
 
+void zdtun_set_socks5_proxy(zdtun_t *tun, const zdtun_ip_t *proxy_ip, uint16_t proxy_port) {
+  tun->socks5.proxy_ip = *proxy_ip;
+  tun->socks5.proxy_port = proxy_port;
+}
+
+/* ******************************************************* */
+
 /* Connection methods */
 void* zdtun_conn_get_userdata(const zdtun_conn_t *conn) {
   return conn->user_data;
@@ -277,6 +292,7 @@ void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata) {
 }
 
 // TODO allow DNAT to different IP version
+// TODO only allow DNAT to a single IP to reduce memory, see tun->socks5
 int zdtun_conn_dnat(zdtun_conn_t *conn, const zdtun_ip_t *dest_ip, uint16_t dest_port) {
   zdtun_dnat_t *dnat = (zdtun_dnat_t*) malloc(sizeof(zdtun_dnat_t));
 
@@ -310,6 +326,11 @@ zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn) {
 
 socket_t zdtun_conn_get_socket(const zdtun_conn_t *conn) {
   return conn->sock;
+}
+
+void zdtun_conn_proxy(zdtun_conn_t *conn) {
+  if(conn->socks5_status == SOCKS5_DISABLED)
+    conn->socks5_status = SOCKS5_ENABLED;
 }
 
 /* ******************************************************* */
@@ -530,6 +551,11 @@ static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
 
   FD_CLR(conn->sock, &tun->tcp_connecting);
   conn->status = CONN_STATUS_CONNECTED;
+
+  if(conn->socks5_status != SOCKS5_DISABLED) {
+    // wait before sending the SYN+ACK
+    return socks5_connect(tun, conn);
+  }
 
   // send the SYN+ACK
   build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0);
@@ -865,6 +891,13 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     if(setsockopt(tcp_sock, SOL_TCP, TCP_NODELAY, &val, sizeof(val)) < 0)
       error("setsockopt TCP_NODELAY failed");
 
+    if(conn->socks5_status != SOCKS5_DISABLED) {
+      if(zdtun_conn_dnat(conn, &tun->socks5.proxy_ip, tun->socks5.proxy_port) != 0) {
+        close_conn(tun, conn, CONN_STATUS_ERROR);
+        return -1;
+      }
+    }
+
     // Setup for the connection
     struct sockaddr_in6 servaddr = {0};
     socklen_t addrlen;
@@ -911,6 +944,19 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   // Here a connection is already active
   if(tun->callbacks.account_packet)
      tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
+
+  if(data->th_flags == TH_SYN) {
+    debug("ignoring SYN retransmission");
+    return 0;
+  }
+
+  if(socks5_in_progress(conn)) {
+    error("Got data while SOCKS5 in progress (status: %d, %d bytes, TCP flags: %d)",
+        conn->socks5_status, pkt->l7_len, data->th_flags);
+
+    close_conn(tun, conn, CONN_STATUS_SOCKS5_ERROR);
+    return -1;
+  }
 
   if(data->th_flags & TH_RST) {
     debug("Got TCP reset from client");
@@ -1283,6 +1329,23 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     return 0;
   }
 
+  if(socks5_in_progress(conn)) {
+    int rv = handle_socks5_reply(tun, conn, payload_ptr, l4_len);
+
+    if(rv != 0)
+      return(rv);
+
+    if(conn->socks5_status == SOCKS5_ESTABLISHED) {
+      // SOCKS5 handshake completed, send the SYN+ACK
+      build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0);
+
+      if((rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN)) == 0)
+        conn->tcp.zdtun_seq += 1;
+    }
+
+    return 0;
+  }
+
   if((conn->tcp.pending) || (conn->tcp.window_size < l4_len)) {
     log_tcp_window("[%d] Insufficient window size detected [window=%d, l4=%d, pending=%d], queuing",
         conn->tuple.src_port, conn->tcp.window_size, l4_len, (conn->tcp.pending ? conn->tcp.pending->size : 0));
@@ -1376,7 +1439,7 @@ static int handle_tcp_connect_async(zdtun_t *tun, zdtun_conn_t *conn) {
   } else {
     if(optval == 0) {
       debug("TCP non-blocking socket connected");
-      tcp_socket_syn(tun, conn);
+      rv = tcp_socket_syn(tun, conn);
       conn->tstamp = time(NULL);
     } else {
       close_with_socket_error(tun, conn, "TCP non-blocking connect");
@@ -1563,7 +1626,11 @@ const char* zdtun_conn_status2str(zdtun_conn_status_t status) {
       return "RESET";
     case CONN_STATUS_UNREACHABLE:
       return "UNREACHABLE";
+    case CONN_STATUS_SOCKS5_ERROR:
+      return "SOCKS5_ERRRO";
   }
 
   return "UNKNOWN";
 }
+
+#include "socks5.c"
