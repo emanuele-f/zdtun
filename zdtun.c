@@ -53,7 +53,7 @@
 static void close_conn(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t status);
 
 #define default_mss(tun, conn) (tun->mtu - sizeof(struct tcphdr) -\
-      ((conn->tuple.ipver == 4) ? sizeof(struct iphdr) : sizeof(struct ipv6_hdr)));
+      ((conn->tuple.ipver == 4) ? sizeof(struct iphdr) : sizeof(struct ipv6_hdr)))
 
 /* ******************************************************* */
 
@@ -534,19 +534,13 @@ void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
 
 static int send_syn_ack(zdtun_t *tun, zdtun_conn_t *conn) {
   int rv;
-
-  // Try to get the actual MSS from the server
-  int mss = default_mss(tun, conn);
-  socklen_t len = sizeof(mss);
-  getsockopt(conn->sock, IPPROTO_TCP, TCP_MAXSEG, &mss, &len);
-
   int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
   uint8_t *opts = (uint8_t*) &tun->reply_buf[iphdr_len + 20];
 
   // MSS option
   *(opts++) = 2;
   *(opts++) = 4;
-  *((uint16_t*)opts) = htons(mss);
+  *((uint16_t*)opts) = htons(default_mss(tun, conn));
 
   build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0, 1 /* n. 32bit words*/);
 
