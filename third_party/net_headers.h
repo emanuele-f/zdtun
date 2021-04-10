@@ -17,8 +17,6 @@
 
 #endif
 
-#define TCP_MAXSEG 2
-
 PACK_ON
 struct iphdr
 {

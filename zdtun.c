@@ -439,7 +439,14 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   tcp->th_ack = (flags & TH_ACK) ? htonl(conn->tcp.client_seq) : 0;
   tcp->th_off = 5 + optsoff;
   tcp->th_flags = flags;
-  tcp->th_win = htons(64240);// TODO read server window
+
+  // Assume that the TCP send buffer is never full. If it becomes full,
+  // "send" will block.
+  // By using the TCP_INFO option it could be possible to extract the
+  // receiver window of the server to emulate it but a 0 window would stall
+  // the connection since we cannot know when the server window will be
+  // available unless we actively monitor the socket.
+  tcp->th_win = htons(64240);
 
   build_reply_ip(conn, tun->reply_buf, l3_len);
   tcp->th_sum = calc_checksum(0, (uint8_t*)tcp, l3_len);
@@ -978,27 +985,21 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       close_conn(tun, conn, CONN_STATUS_CLOSED);
 
     return rv;
-  } else if(conn->sock == INVALID_SOCKET) {
-    debug("Ignore write on closed socket");
-    return 0;
   }
 
-  if(data->th_flags & TH_ACK) {
+  if((data->th_flags & TH_ACK) && (conn->sock != INVALID_SOCKET)) {
     if((uint32_t)(ntohl(data->th_seq) + 1) == conn->tcp.client_seq) {
       debug("TCP KEEPALIVE");
 
-      if(conn->sock != INVALID_SOCKET) {
-        int val = 1;
+      int val = 1;
+      if(setsockopt(conn->sock, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) != 0)
+        error("setsockopt SO_KEEPALIVE failed[%d]: %s", errno, strerror(errno));
 
-        if(setsockopt(conn->sock, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) != 0)
-          error("setsockopt SO_KEEPALIVE failed[%d]: %s", errno, strerror(errno));
+      // Assume that the server is alive until its socket is closed.
+      build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
 
-        // Assume that the server is alive until its socket is closed.
-        build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
-
-        if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN) != 0)
-          return -1;
-      }
+      if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN) != 0)
+        return -1;
     } else {
       // Received ACK from the client, update the window. Take into account
       // the in flight bytes which the client has not ACK-ed yet.
@@ -1024,8 +1025,14 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
   // payload data (avoid sending ACK to an ACK)
   if(pkt->l7_len > 0) {
-    if(send(conn->sock, pkt->l7, pkt->l7_len, 0) < 0)
-      return close_with_socket_error(tun, conn, "TCP send");
+    if(conn->sock != INVALID_SOCKET) {
+      if(send(conn->sock, pkt->l7, pkt->l7_len, 0) < 0)
+        return close_with_socket_error(tun, conn, "TCP send");
+    } else {
+      // The server may have closed the connection while the client is still
+      // sending data. We should still ACK this data
+      debug("Write after server socket closed");
+    }
 
     if(!no_ack) {
       // send the ACK

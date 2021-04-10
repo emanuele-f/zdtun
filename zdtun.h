@@ -117,6 +117,7 @@ typedef SOCKET socket_t;
 #include <unistd.h>
 #define SOL_TCP 6
 #define TCP_NODELAY 1
+#define TCP_MAXSEG 2
 #define socket_errno (errno)
 #define socket_in_progress (EINPROGRESS)
 #define socket_con_refused (ECONNREFUSED)
