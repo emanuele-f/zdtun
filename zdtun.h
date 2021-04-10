@@ -115,6 +115,9 @@ typedef SOCKET socket_t;
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+#include <linux/sockios.h>
+
 #define SOL_TCP 6
 #define TCP_NODELAY 1
 #define TCP_MAXSEG 2

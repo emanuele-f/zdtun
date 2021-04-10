@@ -28,6 +28,7 @@
 #include "third_party/net_headers.h"
 
 #define REPLY_BUF_SIZE 65535
+#define DEFAULT_TCP_WINDOW 65535
 #define MIN_TCP_HEADER_LEN 20
 #define IPV4_HEADER_LEN 20
 #define IPV6_HEADER_LEN 40
@@ -395,6 +396,29 @@ static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
 
 /* ******************************************************* */
 
+#ifndef WIN32
+
+// http://lkml.iu.edu/hypermail/linux/kernel/0502.2/1087.html
+static int get_available_sndbuf(zdtun_conn_t *conn) {
+  int bufsize = 0;
+  int queued = 0;
+  socklen_t len = sizeof(bufsize);
+
+  // Get the available bytes in the send buffer
+  getsockopt(conn->sock, SOL_SOCKET, SO_SNDBUF, &bufsize, &len);
+
+  if(bufsize == 0)
+    return DEFAULT_TCP_WINDOW;
+
+  ioctl(conn->sock, SIOCOUTQ, &queued);
+
+  return max(bufsize - queued, 0);
+}
+
+#endif
+
+/* ******************************************************* */
+
 static void build_reply_ip(zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len) {
   if(conn->tuple.ipver == 4) {
     struct iphdr *ip = (struct iphdr*)pkt_buf;
@@ -431,6 +455,7 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
   const u_int16_t l3_len = l4_len + MIN_TCP_HEADER_LEN + (optsoff * 4);
   struct tcphdr *tcp = (struct tcphdr *)&tun->reply_buf[iphdr_len];
+  int tcpwin;
 
   memset(tcp, 0, MIN_TCP_HEADER_LEN);
   tcp->th_sport = conn->tuple.dst_port;
@@ -440,13 +465,17 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   tcp->th_off = 5 + optsoff;
   tcp->th_flags = flags;
 
-  // Assume that the TCP send buffer is never full. If it becomes full,
-  // "send" will block.
-  // By using the TCP_INFO option it could be possible to extract the
-  // receiver window of the server to emulate it but a 0 window would stall
-  // the connection since we cannot know when the server window will be
-  // available unless we actively monitor the socket.
-  tcp->th_win = htons(64240);
+#ifdef WIN32
+  tcpwin = DEFAULT_TCP_WINDOW;
+#else
+  // To avoid slowdowns, it's better to check the free space in the send
+  // buffer and reduce the TCP window accordingly. If a 0 window is sent,
+  // the client will periodically send TCP_KEEPALIVE to wake the connection.
+  // This prevents connection stall.
+  tcpwin = min(get_available_sndbuf(conn), DEFAULT_TCP_WINDOW);
+#endif
+
+  tcp->th_win = htons(tcpwin);
 
   build_reply_ip(conn, tun->reply_buf, l3_len);
   tcp->th_sum = calc_checksum(0, (uint8_t*)tcp, l3_len);
@@ -936,8 +965,11 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   if(tun->callbacks.account_packet)
      tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
 
-  if(data->th_flags == TH_SYN) {
-    debug("ignoring SYN retransmission");
+  uint8_t is_keep_alive = ((data->th_flags & TH_ACK) &&
+    ((ntohl(data->th_seq) + 1) == conn->tcp.client_seq));
+
+  if(!is_keep_alive && (ntohl(data->th_seq) != conn->tcp.client_seq)) {
+    debug("ignoring retransmission");
     return 0;
   }
 
@@ -967,7 +999,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
         debug("shutdown failed[%d] %s", errno, strerror(errno));
     }
 
-    conn->tcp.client_seq += pkt->l7_len + 1;
+    conn->tcp.client_seq += ((uint32_t)pkt->l7_len) + 1;
     conn->tcp.client_closed = true;
 
     // send the ACK
@@ -982,7 +1014,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   }
 
   if((data->th_flags & TH_ACK) && (conn->sock != INVALID_SOCKET)) {
-    if((uint32_t)(ntohl(data->th_seq) + 1) == conn->tcp.client_seq) {
+    if(is_keep_alive) {
       debug("TCP KEEPALIVE");
 
       int val = 1;
@@ -1020,6 +1052,8 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   // payload data (avoid sending ACK to an ACK)
   if(pkt->l7_len > 0) {
     if(conn->sock != INVALID_SOCKET) {
+      //printf("TICK %ld\n", clock());
+
       if(send(conn->sock, pkt->l7, pkt->l7_len, 0) < 0)
         return close_with_socket_error(tun, conn, "TCP send");
     } else {
