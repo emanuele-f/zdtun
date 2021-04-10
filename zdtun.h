@@ -404,10 +404,9 @@ int zdtun_get_num_connections(zdtun_t *tun);
 int zdtun_parse_pkt(const char *pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pinfo);
 
 /*
- * Set the maximum TCP window size.
- * This can be used to artificially produce smallert TCP segments.
+ * Set the virtual MTU. It is used to determine the MSS.
  */
-void zdtun_set_max_window_size(zdtun_t *tun, int max_len);
+void zdtun_set_mtu(zdtun_t *tun, int mtu);
 
 /*
  * Forward a client packet through the pivot.

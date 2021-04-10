@@ -15,7 +15,9 @@
 #define IPPROTO_UDP             17
 #define IPPROTO_ICMPV6          58
 
-#endif  
+#endif
+
+#define TCP_MAXSEG 2
 
 PACK_ON
 struct iphdr

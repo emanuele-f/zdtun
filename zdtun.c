@@ -28,7 +28,6 @@
 #include "third_party/net_headers.h"
 
 #define REPLY_BUF_SIZE 65535
-#define TCP_WINDOW_SIZE 64240
 #define MIN_TCP_HEADER_LEN 20
 #define IPV4_HEADER_LEN 20
 #define IPV6_HEADER_LEN 40
@@ -53,13 +52,10 @@
 
 static void close_conn(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t status);
 
-/* ******************************************************* */
+#define default_mss(tun, conn) (tun->mtu - sizeof(struct tcphdr) -\
+      ((conn->tuple.ipver == 4) ? sizeof(struct iphdr) : sizeof(struct ipv6_hdr)));
 
-struct tcp_pending_data {
-  char *data;
-  int size;
-  int sofar;
-};
+/* ******************************************************* */
 
 typedef struct zdtun_dnat {
   zdtun_ip_t ip;
@@ -79,9 +75,9 @@ typedef struct zdtun_conn {
     u_int32_t client_seq;    // next client sequence number
     u_int32_t zdtun_seq;     // next proxy sequence number
     u_int16_t window_size;   // client window size
+    u_int16_t mss;           // client MSS
     bool fin_ack_sent;
     bool client_closed;
-    struct tcp_pending_data *pending;
   } tcp;
 
   struct {
@@ -99,7 +95,7 @@ typedef struct zdtun_t {
   void *user_data;
   fd_set all_fds;
   fd_set tcp_connecting;
-  int max_window_size;
+  uint32_t mtu;
   zdtun_statistics_t stats;
   char reply_buf[REPLY_BUF_SIZE];
 
@@ -355,7 +351,7 @@ zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
   }
 
   tun->user_data = udata;
-  tun->max_window_size = TCP_WINDOW_SIZE;
+  tun->mtu = 1500;
   memcpy(&tun->callbacks, callbacks, sizeof(tun->callbacks));
 
   FD_ZERO(&tun->all_fds);
@@ -430,9 +426,10 @@ static void build_reply_ip(zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len) 
 
 /* ******************************************************* */
 
-static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags, u_int16_t l4_len) {
+static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
+        u_int16_t l4_len, u_int16_t optsoff) {
   int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
-  const u_int16_t l3_len = l4_len + MIN_TCP_HEADER_LEN;
+  const u_int16_t l3_len = l4_len + MIN_TCP_HEADER_LEN + (optsoff * 4);
   struct tcphdr *tcp = (struct tcphdr *)&tun->reply_buf[iphdr_len];
 
   memset(tcp, 0, MIN_TCP_HEADER_LEN);
@@ -440,9 +437,9 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags, 
   tcp->th_dport = conn->tuple.src_port;
   tcp->th_seq = htonl(conn->tcp.zdtun_seq);
   tcp->th_ack = (flags & TH_ACK) ? htonl(conn->tcp.client_seq) : 0;
-  tcp->th_off = 5;
+  tcp->th_off = 5 + optsoff;
   tcp->th_flags = flags;
-  tcp->th_win = htons(tun->max_window_size);
+  tcp->th_win = htons(64240);// TODO read server window
 
   build_reply_ip(conn, tun->reply_buf, l3_len);
   tcp->th_sum = calc_checksum(0, (uint8_t*)tcp, l3_len);
@@ -485,16 +482,10 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t sta
   close_socket(tun, conn->sock);
   conn->sock = INVALID_SOCKET;
 
-  if(conn->tcp.pending) {
-    free(conn->tcp.pending->data);
-    free(conn->tcp.pending);
-    conn->tcp.pending = NULL;
-  }
-
   if((conn->tuple.ipproto == IPPROTO_TCP)
       && !conn->tcp.fin_ack_sent) {
     // Send TCP RST
-    build_reply_tcpip(tun, conn, TH_RST | TH_ACK, 0);
+    build_reply_tcpip(tun, conn, TH_RST | TH_ACK, 0, 0);
     send_to_client(tun, conn, MIN_TCP_HEADER_LEN);
   }
 
@@ -534,9 +525,33 @@ void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
-static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
-  int rv = 0;
+static int send_syn_ack(zdtun_t *tun, zdtun_conn_t *conn) {
+  int rv;
 
+  // Try to get the actual MSS from the server
+  int mss = default_mss(tun, conn);
+  socklen_t len = sizeof(mss);
+  getsockopt(conn->sock, IPPROTO_TCP, TCP_MAXSEG, &mss, &len);
+
+  int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+  uint8_t *opts = (uint8_t*) &tun->reply_buf[iphdr_len + 20];
+
+  // MSS option
+  *(opts++) = 2;
+  *(opts++) = 4;
+  *((uint16_t*)opts) = htons(mss);
+
+  build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0, 1 /* n. 32bit words*/);
+
+  if((rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN + 4 /* opts length */)) == 0)
+    conn->tcp.zdtun_seq += 1;
+
+  return rv;
+}
+
+/* ******************************************************* */
+
+static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
   // disable non-blocking mode from now on
 
 #ifdef WIN32
@@ -557,19 +572,13 @@ static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
     return socks5_connect(tun, conn);
   }
 
-  // send the SYN+ACK
-  build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0);
-
-  if((rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN)) == 0)
-    conn->tcp.zdtun_seq += 1;
-
-  return rv;
+  return send_syn_ack(tun, conn);
 }
 
 /* ******************************************************* */
 
 static void tcp_socket_fin_ack(zdtun_t *tun, zdtun_conn_t *conn) {
-  build_reply_tcpip(tun, conn, TH_FIN | TH_ACK, 0);
+  build_reply_tcpip(tun, conn, TH_FIN | TH_ACK, 0, 0);
 
   if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN) == 0)
     conn->tcp.zdtun_seq += 1;
@@ -618,47 +627,6 @@ zdtun_conn_t* zdtun_lookup(zdtun_t *tun, const zdtun_5tuple_t *tuple, uint8_t cr
   }
 
   return conn;
-}
-
-/* ******************************************************* */
-
-static int process_pending_tcp_packets(zdtun_t *tun, zdtun_conn_t *conn) {
-  struct tcp_pending_data *pending = conn->tcp.pending;
-  int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
-
-  if(!conn->tcp.window_size || !pending || (conn->sock == INVALID_SOCKET))
-    return 0;
-
-  int remaining = pending->size - pending->sofar;
-  int to_send = min(conn->tcp.window_size, remaining);
-
-  log_tcp_window("[%d][Window size: %d] Sending %d/%d bytes pending data", conn->tuple.src_port, conn->tcp.window_size, to_send, remaining);
-  memcpy(tun->reply_buf + MIN_TCP_HEADER_LEN + iphdr_len, &pending->data[pending->sofar], to_send);
-
-  // proxy back the TCP port and reconstruct the TCP header
-  build_reply_tcpip(tun, conn, TH_PUSH | TH_ACK, to_send);
-
-  if(send_to_client(tun, conn, to_send + MIN_TCP_HEADER_LEN) != 0) {
-    log_tcp_window("[%d][Window size: %d] failed", conn->tuple.src_port, conn->tcp.window_size);
-    return -1;
-  }
-
-  conn->tcp.zdtun_seq += to_send;
-  conn->tcp.window_size -= to_send;
-
-  log_tcp_window("[%d][Window size: %d] Remaining to send: %d", conn->tuple.src_port, conn->tcp.window_size, remaining - to_send);
-
-  if(remaining == to_send) {
-    free(pending->data);
-    free(pending);
-    conn->tcp.pending = NULL;
-
-    // make the socket selectable again
-    FD_SET(conn->sock, &tun->all_fds);
-  } else
-    pending->sofar += to_send;
-
-  return 0;
 }
 
 /* ******************************************************* */
@@ -834,8 +802,8 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
 
 /* ******************************************************* */
 
-void zdtun_set_max_window_size(zdtun_t *tun, int max_len) {
-  tun->max_window_size = max_len;
+void zdtun_set_mtu(zdtun_t *tun, int mtu) {
+  tun->mtu = min(mtu, REPLY_BUF_SIZE);
 }
 
 /* ******************************************************* */
@@ -919,6 +887,28 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     if(tun->callbacks.account_packet)
       tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
 
+    // TCP options
+    uint8_t optslen = data->th_off * 4 - 20;
+    uint8_t *opts = (uint8_t*)data + 20;
+    uint16_t mss = default_mss(tun, conn);
+
+    while(optslen > 1) {
+      uint8_t kind = *opts++;
+      uint8_t len = *opts++;
+
+      if((kind == 0) || (len < 2) || (optslen < len))
+        break;
+
+      if((kind == 2) && (len == 4)) // MSS
+        mss = ntohs(*(uint16_t*)opts);
+
+      opts += (len - 2);
+      optslen -= len;
+    }
+
+    conn->tcp.window_size = ntohs(data->th_win);
+    conn->tcp.mss = mss;
+
     // connect with the server
     if(connect(tcp_sock, (struct sockaddr *) &servaddr, addrlen) == SOCKET_ERROR) {
       if(socket_errno == socket_in_progress) {
@@ -980,7 +970,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     conn->tcp.client_closed = true;
 
     // send the ACK
-    build_reply_tcpip(tun, conn, TH_ACK, 0);
+    build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
     rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN);
 
     if(conn->sock == INVALID_SOCKET)
@@ -1004,7 +994,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
           error("setsockopt SO_KEEPALIVE failed[%d]: %s", errno, strerror(errno));
 
         // Assume that the server is alive until its socket is closed.
-        build_reply_tcpip(tun, conn, TH_ACK, 0);
+        build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
 
         if(send_to_client(tun, conn, MIN_TCP_HEADER_LEN) != 0)
           return -1;
@@ -1021,10 +1011,14 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
         // TCP seq wrapped
         in_flight = 0xFFFFFFFF - ack_num + conn->tcp.zdtun_seq + 1;
 
-      conn->tcp.window_size = min(ntohs(data->th_win), tun->max_window_size) - in_flight;
+      conn->tcp.window_size = ntohs(data->th_win) - in_flight;
 
-      if(process_pending_tcp_packets(tun, conn) != 0)
-        return -1;
+      if(!FD_ISSET(conn->sock, &tun->all_fds) && (conn->tcp.window_size > 0)) {
+        log_tcp_window("[%d][Window size: %d] enabling socket", conn->tuple.src_port, conn->tcp.window_size);
+
+        // make the socket selectable again
+        FD_SET(conn->sock, &tun->all_fds);
+      }
     }
   }
 
@@ -1036,7 +1030,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     if(!no_ack) {
       // send the ACK
       conn->tcp.client_seq += pkt->l7_len;
-      build_reply_tcpip(tun, conn, TH_ACK, 0);
+      build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
 
       return send_to_client(tun, conn, MIN_TCP_HEADER_LEN);
     }
@@ -1300,7 +1294,8 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
   char *payload_ptr = tun->reply_buf + iphdr_len + MIN_TCP_HEADER_LEN;
-  int l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE - iphdr_len - MIN_TCP_HEADER_LEN, 0);
+  int to_recv = min(conn->tcp.window_size, conn->tcp.mss);
+  int l4_len = recv(conn->sock, payload_ptr, to_recv, 0);
 
   conn->tstamp = time(NULL);
 
@@ -1308,9 +1303,6 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     return close_with_socket_error(tun, conn, "TCP recv");
   else if(l4_len == 0) {
     debug("Server socket closed");
-
-    if(conn->tcp.pending)
-      log("[WARNING]: This should never happen!!");
 
     if(!conn->tcp.fin_ack_sent) {
       tcp_socket_fin_ack(tun, conn);
@@ -1337,49 +1329,32 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
     if(conn->socks5_status == SOCKS5_ESTABLISHED) {
       // SOCKS5 handshake completed, send the SYN+ACK
-      build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0);
-
-      if((rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN)) == 0)
-        conn->tcp.zdtun_seq += 1;
+      rv = send_syn_ack(tun, conn);
     }
 
-    return 0;
+    return rv;
   }
 
-  if((conn->tcp.pending) || (conn->tcp.window_size < l4_len)) {
-    log_tcp_window("[%d] Insufficient window size detected [window=%d, l4=%d, pending=%d], queuing",
-        conn->tuple.src_port, conn->tcp.window_size, l4_len, (conn->tcp.pending ? conn->tcp.pending->size : 0));
-
-    struct tcp_pending_data *pending = conn->tcp.pending;
-
-    if(!pending) {
-      safe_alloc(pending, struct tcp_pending_data);
-      pending->size = 0;
-      pending->data = NULL;
-      conn->tcp.pending = pending;
-    }
-
-    pending->data = (char*) realloc(pending->data, pending->size + l4_len);
-
-    if(!pending->data)
-        fatal("realloc tcp.pending_data failed");
-
-    memcpy(pending->data + pending->size, payload_ptr, l4_len);
-    pending->size += l4_len;
-
-    // stop receiving updates for the socket
-    FD_CLR(conn->sock, &tun->all_fds);
-
-    // try to send a little bit of data right now
-    return process_pending_tcp_packets(tun, conn);
+  if(conn->tcp.window_size < l4_len) {
+    error("Invalid state: TCP windows_size < l4_len");
+    close_conn(tun, conn, CONN_STATUS_ERROR);
+    return -1;
   }
 
   // NAT back the TCP port and reconstruct the TCP header
-  build_reply_tcpip(tun, conn, TH_PUSH | TH_ACK, l4_len);
+  build_reply_tcpip(tun, conn, TH_PUSH | TH_ACK, l4_len, 0);
 
   if(send_to_client(tun, conn, l4_len + MIN_TCP_HEADER_LEN) == 0) {
     conn->tcp.zdtun_seq += l4_len;
     conn->tcp.window_size -= l4_len;
+
+    if(conn->tcp.window_size == 0) {
+      log_tcp_window("[%d] Zero window size detected [l4=%d], disabling socket",
+        conn->tuple.src_port, l4_len);
+
+      // stop receiving updates for the socket, until the TCP window is updated
+      FD_CLR(conn->sock, &tun->all_fds);
+    }
   } else
     return -1;
 
@@ -1627,7 +1602,7 @@ const char* zdtun_conn_status2str(zdtun_conn_status_t status) {
     case CONN_STATUS_UNREACHABLE:
       return "UNREACHABLE";
     case CONN_STATUS_SOCKS5_ERROR:
-      return "SOCKS5_ERRRO";
+      return "SOCKS5_ERROR";
   }
 
   return "UNKNOWN";
