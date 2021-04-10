@@ -75,8 +75,9 @@ typedef struct zdtun_conn {
   struct {
     u_int32_t client_seq;    // next client sequence number
     u_int32_t zdtun_seq;     // next proxy sequence number
-    u_int16_t window_size;   // client window size
+    u_int32_t window_size;   // scaled client window size
     u_int16_t mss;           // client MSS
+    u_int8_t window_scale;   // client/zdtun TCP window scale
     bool fin_ack_sent;
     bool client_closed;
   } tcp;
@@ -455,7 +456,7 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
   const u_int16_t l3_len = l4_len + MIN_TCP_HEADER_LEN + (optsoff * 4);
   struct tcphdr *tcp = (struct tcphdr *)&tun->reply_buf[iphdr_len];
-  int tcpwin;
+  uint32_t tcpwin;
 
   memset(tcp, 0, MIN_TCP_HEADER_LEN);
   tcp->th_sport = conn->tuple.dst_port;
@@ -472,10 +473,11 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   // buffer and reduce the TCP window accordingly. If a 0 window is sent,
   // the client will periodically send TCP_KEEPALIVE to wake the connection.
   // This prevents connection stall.
-  tcpwin = min(get_available_sndbuf(conn), DEFAULT_TCP_WINDOW);
+  tcpwin = get_available_sndbuf(conn);
 #endif
 
-  tcp->th_win = htons(tcpwin);
+  uint32_t max_win = ((uint32_t)0xFFFF) << conn->tcp.window_scale;
+  tcp->th_win = htons(min(tcpwin, max_win) >> conn->tcp.window_scale);
 
   build_reply_ip(conn, tun->reply_buf, l3_len);
   tcp->th_sum = calc_checksum(0, (uint8_t*)tcp, l3_len);
@@ -570,10 +572,19 @@ static int send_syn_ack(zdtun_t *tun, zdtun_conn_t *conn) {
   *(opts++) = 2;
   *(opts++) = 4;
   *((uint16_t*)opts) = htons(default_mss(tun, conn));
+  opts += 2;
 
-  build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0, 1 /* n. 32bit words*/);
+  // Window Scale
+  *(opts++) = 3;
+  *(opts++) = 3;
+  *(opts++) = conn->tcp.window_scale;
 
-  if((rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN + 4 /* opts length */)) == 0)
+  // End, aligned to 32 bits
+  *(opts++) = 0;
+
+  build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0, 2 /* n. 32bit words*/);
+
+  if((rv = send_to_client(tun, conn, MIN_TCP_HEADER_LEN + 8 /* opts length */)) == 0)
     conn->tcp.zdtun_seq += 1;
 
   return rv;
@@ -921,10 +932,18 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     uint8_t optslen = data->th_off * 4 - 20;
     uint8_t *opts = (uint8_t*)data + 20;
     uint16_t mss = default_mss(tun, conn);
+    uint8_t scale = 0;
 
     while(optslen > 1) {
       uint8_t kind = *opts++;
-      uint8_t len = *opts++;
+      uint8_t len;
+
+      if(kind == 1) { // NOP
+        optslen++;
+        continue;
+      }
+
+      len = *opts++;
 
       if((kind == 0) || (len < 2) || (optslen < len))
         break;
@@ -932,11 +951,17 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       if((kind == 2) && (len == 4)) // MSS
         mss = ntohs(*(uint16_t*)opts);
 
+      if((kind == 3) && (len == 3)) // Window Scale
+        scale = *opts;
+
       opts += (len - 2);
       optslen -= len;
     }
 
-    conn->tcp.window_size = ntohs(data->th_win);
+    debug("MSS: %d, scale: %d\n", mss, scale);
+
+    conn->tcp.window_size = ntohs(data->th_win) << scale;
+    conn->tcp.window_scale = scale;
     conn->tcp.mss = mss;
 
     // connect with the server
@@ -1038,10 +1063,11 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
         // TCP seq wrapped
         in_flight = 0xFFFFFFFF - ack_num + conn->tcp.zdtun_seq + 1;
 
-      conn->tcp.window_size = ntohs(data->th_win) - in_flight;
+      uint32_t window = ntohs(data->th_win) << conn->tcp.window_scale;
+      conn->tcp.window_size = window - in_flight;
 
       if(!FD_ISSET(conn->sock, &tun->all_fds) && (conn->tcp.window_size > 0)) {
-        log_tcp_window("[%d][Window size: %d] enabling socket", conn->tuple.src_port, conn->tcp.window_size);
+        log_tcp_window("[%d][Window size: %u] enabling socket", conn->tuple.src_port, conn->tcp.window_size);
 
         // make the socket selectable again
         FD_SET(conn->sock, &tun->all_fds);
