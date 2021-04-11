@@ -58,6 +58,14 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t sta
 
 /* ******************************************************* */
 
+typedef struct {
+  uint16_t len;
+  bool push;
+  char data[];
+} partial_segment_t;
+
+/* ******************************************************* */
+
 typedef struct zdtun_dnat {
   zdtun_ip_t ip;
   u_int16_t port;
@@ -73,6 +81,7 @@ typedef struct zdtun_conn {
   zdtun_dnat_t *dnat;
 
   struct {
+    partial_segment_t *partial_send;
     u_int32_t client_seq;    // next client sequence number
     u_int32_t zdtun_seq;     // next proxy sequence number
     u_int32_t window_size;   // scaled client window size
@@ -96,7 +105,7 @@ typedef struct zdtun_t {
   struct zdtun_callbacks callbacks;
   void *user_data;
   fd_set all_fds;
-  fd_set tcp_connecting;
+  fd_set write_fds;
   uint32_t mtu;
   zdtun_statistics_t stats;
   char reply_buf[REPLY_BUF_SIZE];
@@ -150,7 +159,7 @@ struct ip6_hdr_pseudo {
 void zdtun_fds(zdtun_t *tun, int *max_fd, fd_set *rdfd, fd_set *wrfd) {
   *max_fd = tun->stats.all_max_fd;
   *rdfd = tun->all_fds;
-  *wrfd = tun->tcp_connecting;
+  *wrfd = tun->write_fds;
 }
 
 /* ******************************************************* */
@@ -216,7 +225,7 @@ static void close_socket(zdtun_t *tun, socket_t sock) {
     tun->callbacks.on_socket_close(tun, sock);
 
   FD_CLR(sock, &tun->all_fds);
-  FD_CLR(sock, &tun->tcp_connecting);
+  FD_CLR(sock, &tun->write_fds);
 
   tun->stats.num_open_sockets = max(tun->stats.num_open_sockets-1, 0);
 }
@@ -357,7 +366,7 @@ zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
   memcpy(&tun->callbacks, callbacks, sizeof(tun->callbacks));
 
   FD_ZERO(&tun->all_fds);
-  FD_ZERO(&tun->tcp_connecting);
+  FD_ZERO(&tun->write_fds);
 
   return tun;
 }
@@ -399,11 +408,21 @@ static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
 
 #ifndef WIN32
 
+// Try to get the free space in the socket TX buffer. The value returned
+// is just an approximation which helps tuning the TCP receiver window
+// seen by the client, thus possibly throttling the upload before
+// reaching the bottleneck and subsequent retransmissions.
+//
 // http://lkml.iu.edu/hypermail/linux/kernel/0502.2/1087.html
+// https://gitlab.torproject.org/tpo/core/tor/-/issues/12890
 static int get_available_sndbuf(zdtun_conn_t *conn) {
   int bufsize = 0;
   int queued = 0;
   socklen_t len = sizeof(bufsize);
+
+  // Bottleneck was reached, send a 0 window.
+  if(conn->tcp.partial_send)
+    return 0;
 
   // Get the available bytes in the send buffer
   getsockopt(conn->sock, SOL_SOCKET, SO_SNDBUF, &bufsize, &len);
@@ -412,8 +431,9 @@ static int get_available_sndbuf(zdtun_conn_t *conn) {
     return DEFAULT_TCP_WINDOW;
 
   ioctl(conn->sock, SIOCOUTQ, &queued);
+  int sockbuf_avail = bufsize - queued;
 
-  return max(bufsize - queued, 0);
+  return max(sockbuf_avail, 0);
 }
 
 #endif
@@ -456,6 +476,7 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   int iphdr_len = (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
   const u_int16_t l3_len = l4_len + MIN_TCP_HEADER_LEN + (optsoff * 4);
   struct tcphdr *tcp = (struct tcphdr *)&tun->reply_buf[iphdr_len];
+  uint32_t max_win = ((uint32_t)0xFFFF) << conn->tcp.window_scale;
   uint32_t tcpwin;
 
   memset(tcp, 0, MIN_TCP_HEADER_LEN);
@@ -467,17 +488,16 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   tcp->th_flags = flags;
 
 #ifdef WIN32
-  tcpwin = DEFAULT_TCP_WINDOW;
+  tcpwin = max_win;
 #else
   // To avoid slowdowns, it's better to check the free space in the send
   // buffer and reduce the TCP window accordingly. If a 0 window is sent,
   // the client will periodically send TCP_KEEPALIVE to wake the connection.
   // This prevents connection stall.
-  tcpwin = get_available_sndbuf(conn);
+  tcpwin = min(get_available_sndbuf(conn), max_win);
 #endif
 
-  uint32_t max_win = ((uint32_t)0xFFFF) << conn->tcp.window_scale;
-  tcp->th_win = htons(min(tcpwin, max_win) >> conn->tcp.window_scale);
+  tcp->th_win = htons(tcpwin >> conn->tcp.window_scale);
 
   build_reply_ip(conn, tun->reply_buf, l3_len);
   tcp->th_sum = calc_checksum(0, (uint8_t*)tcp, l3_len);
@@ -525,6 +545,11 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t sta
     // Send TCP RST
     build_reply_tcpip(tun, conn, TH_RST | TH_ACK, 0, 0);
     send_to_client(tun, conn, MIN_TCP_HEADER_LEN);
+  }
+
+  if((conn->tuple.ipproto == IPPROTO_TCP) && (conn->tcp.partial_send)) {
+    free(conn->tcp.partial_send);
+    conn->tcp.partial_send = NULL;
   }
 
   conn->status = (status >= CONN_STATUS_CLOSED) ? status : CONN_STATUS_CLOSED;
@@ -605,7 +630,7 @@ static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
     error("Cannot disable non-blocking: %d", errno);
 #endif
 
-  FD_CLR(conn->sock, &tun->tcp_connecting);
+  FD_CLR(conn->sock, &tun->write_fds);
   conn->status = CONN_STATUS_CONNECTED;
 
   if(conn->socks5_status != SOCKS5_DISABLED) {
@@ -895,11 +920,6 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
     conn->sock = tcp_sock;
 
-    // Enable TCP_NODELAY to avoid slowing down the connection
-    val = 1;
-    if(setsockopt(tcp_sock, SOL_TCP, TCP_NODELAY, &val, sizeof(val)) < 0)
-      error("setsockopt TCP_NODELAY failed");
-
     if(conn->socks5_status != SOCKS5_DISABLED) {
       if(zdtun_conn_dnat(conn, &tun->socks5.proxy_ip, tun->socks5.proxy_port) != 0) {
         close_conn(tun, conn, CONN_STATUS_ERROR);
@@ -982,7 +1002,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       return tcp_socket_syn(tun, conn);
 
     conn->status = CONN_STATUS_CONNECTING;
-    FD_SET(tcp_sock, &tun->tcp_connecting);
+    FD_SET(tcp_sock, &tun->write_fds);
     return 0;
   }
 
@@ -990,11 +1010,12 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   if(tun->callbacks.account_packet)
      tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
 
+  uint32_t seq = ntohl(data->th_seq);
   uint8_t is_keep_alive = ((data->th_flags & TH_ACK) &&
-    ((ntohl(data->th_seq) + 1) == conn->tcp.client_seq));
+    ((seq + 1) == conn->tcp.client_seq));
 
-  if(!is_keep_alive && (ntohl(data->th_seq) != conn->tcp.client_seq)) {
-    debug("ignoring retransmission");
+  if(!is_keep_alive && (seq != conn->tcp.client_seq)) {
+    debug("ignoring out of sequence data: expected %d, got %d", conn->tcp.client_seq, seq);
     return 0;
   }
 
@@ -1078,10 +1099,46 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   // payload data (avoid sending ACK to an ACK)
   if(pkt->l7_len > 0) {
     if(conn->sock != INVALID_SOCKET) {
-      //printf("TICK %ld\n", clock());
+      if(conn->tcp.partial_send) {
+        // Another partial send is in progress. New packets can be simply
+        // discarded as they will be retransmitted by the client. This
+        // simulates network congestion and thus throttles the client.
+        log_partial_send("Discarding %d packet SEQ %u", pkt->l7_len, seq);
+        return 0;
+      }
 
-      if(send(conn->sock, pkt->l7, pkt->l7_len, 0) < 0)
+      // MSG_MORE buffers packets until the TH_PUSH is set
+      // Use MSG_DONTWAIT to avoid blocking on large uploads
+      int flags = ((data->th_flags & TH_PUSH) ? 0 : MSG_MORE) | MSG_DONTWAIT;
+      int rv = send(conn->sock, pkt->l7, pkt->l7_len, flags);
+
+      if((rv < 0) && (errno != EWOULDBLOCK) && (errno != EAGAIN))
         return close_with_socket_error(tun, conn, "TCP send");
+      else if(rv != pkt->l7_len) {
+        partial_segment_t *partial;
+        int sent = max(0, rv);
+        int remaining = pkt->l7_len - sent;
+
+        log_partial_send("TCP partial send: sent %d, remaining %d", sent, remaining);
+
+        partial = malloc(sizeof(partial_segment_t) + remaining);
+
+        if(!partial) {
+          error("malloc(partial_segment_t) failed");
+          close_conn(tun, conn, CONN_STATUS_ERROR);
+          return -1;
+        }
+
+        partial->push = (data->th_flags & TH_PUSH);
+        partial->len = remaining;
+        memcpy(partial->data, pkt->l7 + sent, remaining);
+        conn->tcp.partial_send = partial;
+
+        // will be handled in handle_partial_send
+        FD_SET(conn->sock, &tun->write_fds);
+
+        // will send the ACK with the 0 window below
+      }
     } else {
       // The server may have closed the connection while the client is still
       // sending data. We should still ACK this data
@@ -1488,6 +1545,37 @@ static int handle_tcp_connect_async(zdtun_t *tun, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
+static int handle_partial_send(zdtun_t *tun, zdtun_conn_t *conn) {
+  partial_segment_t *partial = conn->tcp.partial_send;
+
+  int flags = ((partial->push) ? 0 : MSG_MORE) | MSG_DONTWAIT;
+  int rv = send(conn->sock, partial->data, partial->len, flags);
+
+  // No need to check EWOULDBLOCK|EAGAIN, as the socket is writable
+  if(rv < 0)
+    return close_with_socket_error(tun, conn, "TCP send2");
+  else if(rv != partial->len) {
+    int remaining = partial->len - rv;
+
+    log_partial_send("TCP partial send: sent %d, still reamining %d", rv, remaining);
+
+    memmove(partial->data, partial->data + rv, remaining);
+    partial->len -= rv;
+  } else {
+    // NOTE, client ACK was already sent
+    log_partial_send("TCP partial send completed: %d B", partial->len);
+
+    free(partial);
+    conn->tcp.partial_send = NULL;
+
+    FD_CLR(conn->sock, &tun->write_fds);
+  }
+
+  return 0;
+}
+
+/* ******************************************************* */
+
 int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
   int num_hits = 0;
   zdtun_conn_t *conn, *tmp;
@@ -1511,9 +1599,12 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
 
       num_hits++;
     } else if(FD_ISSET(conn->sock, wr_fds)) {
-      if(ipproto == IPPROTO_TCP)
-        rv = handle_tcp_connect_async(tun, conn);
-      else
+      if(ipproto == IPPROTO_TCP) {
+        if(conn->tcp.partial_send)
+          rv = handle_partial_send(tun, conn);
+        else
+          rv = handle_tcp_connect_async(tun, conn);
+      } else
         error("Unhandled socket.wr proto: %d", ipproto);
 
       num_hits++;

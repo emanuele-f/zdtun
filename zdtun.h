@@ -36,6 +36,7 @@
 /* DEBUG OPTIONS */
 //#define SHOW_DEBUG
 //#define SHOW_TCP_WINDOW_LOG
+//#define SHOW_PARTIAL_TCP_SEND_LOG
 
 /* ********************************* */
 
@@ -45,11 +46,16 @@
 #define debug(...) {}
 #endif
 
-
 #ifdef SHOW_TCP_WINDOW_LOG
 #define log_tcp_window(...) { log(__VA_ARGS__); }
 #else
 #define log_tcp_window(...) {}
+#endif
+
+#ifdef SHOW_PARTIAL_TCP_SEND_LOG
+#define log_partial_send(...) { log(__VA_ARGS__); }
+#else
+#define log_partial_send(...) {}
 #endif
 
 #ifndef NO_DEBUG
