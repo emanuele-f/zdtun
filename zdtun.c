@@ -362,7 +362,7 @@ zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
   }
 
   tun->user_data = udata;
-  tun->mtu = 1500;
+  tun->mtu = 1486;
   memcpy(&tun->callbacks, callbacks, sizeof(tun->callbacks));
 
   FD_ZERO(&tun->all_fds);
