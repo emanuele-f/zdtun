@@ -25,15 +25,13 @@
 #define __ZDTUN_SOCKS5_H__
 
 typedef enum {
-  SOCKS5_DISABLED,
-  SOCKS5_ENABLED,
-  SOCKS5_HELLO,
+  SOCKS5_HELLO = 0,
   SOCKS5_CONNECTING,
   SOCKS5_SKIP_BND,
   SOCKS5_ESTABLISHED
-} socks5_t;
+} socks5_status_t;
 
-#define socks5_in_progress(c) ((c->socks5_status != SOCKS5_DISABLED)\
+#define socks5_in_progress(c) ((c->proxy_mode == PROXY_SOCKS5)\
   && (c->socks5_status != SOCKS5_ESTABLISHED))
 
 int socks5_connect(zdtun_t *tun, zdtun_conn_t *conn);

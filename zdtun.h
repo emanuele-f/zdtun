@@ -490,10 +490,17 @@ const char* zdtun_conn_status2str(zdtun_conn_status_t status);
  */
 void zdtun_set_socks5_proxy(zdtun_t *tun, const zdtun_ip_t *proxy_ip, uint16_t proxy_port, uint8_t ipver);
 
+/*
+ * Set DNAT info. Individual connections to DNAT must be marked by
+ * calling zdtun_conn_dnat.
+ */
+void zdtun_set_dnat_info(zdtun_t *tun, const zdtun_ip_t *proxy_ip, uint16_t proxy_port, uint8_t ipver);
+
 /* Connection methods */
 void* zdtun_conn_get_userdata(const zdtun_conn_t *conn);
 void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata);
 void zdtun_conn_proxy(zdtun_conn_t *conn);
+void zdtun_conn_dnat(zdtun_conn_t *conn);
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
 time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);
 zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn);

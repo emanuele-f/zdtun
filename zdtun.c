@@ -53,9 +53,6 @@
 
 static void close_conn(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t status);
 
-#define sock_ipver(tun, conn) ((conn->socks5_status != SOCKS5_DISABLED) ?\
-      (tun->socks5.proxy_ipver) : (conn->tuple.ipver))
-
 #define default_mss(tun, conn) (tun->mtu - sizeof(struct tcphdr) -\
       ((sock_ipver(tun, conn) == 4) ? sizeof(struct iphdr) : sizeof(struct ipv6_hdr)))
 
@@ -67,6 +64,18 @@ typedef struct {
   char data[];
 } partial_segment_t;
 
+typedef enum {
+  PROXY_NONE = 0,
+  PROXY_DNAT,
+  PROXY_SOCKS5,
+} proxy_mode_t;
+
+typedef struct {
+  zdtun_ip_t ip;
+  uint16_t port;
+  uint8_t ipver;
+} proxy_t;
+
 /* ******************************************************* */
 
 typedef struct zdtun_conn {
@@ -74,7 +83,9 @@ typedef struct zdtun_conn {
   time_t tstamp;
   socket_t sock;
   zdtun_conn_status_t status;
-  socks5_t socks5_status;
+
+  proxy_mode_t proxy_mode;
+  socks5_status_t socks5_status;
   uint8_t socks5_skip;
 
   struct {
@@ -110,11 +121,8 @@ typedef struct zdtun_t {
   zdtun_statistics_t stats;
   char reply_buf[REPLY_BUF_SIZE];
 
-  struct {
-    zdtun_ip_t proxy_ip;
-    uint16_t proxy_port;
-    uint8_t proxy_ipver;
-  } socks5;
+  proxy_t socks5;
+  proxy_t dnat;
 
   zdtun_conn_t *sock_2_conn;
   zdtun_conn_t *conn_table;
@@ -161,6 +169,17 @@ void zdtun_fds(zdtun_t *tun, int *max_fd, fd_set *rdfd, fd_set *wrfd) {
   *max_fd = tun->stats.all_max_fd;
   *rdfd = tun->all_fds;
   *wrfd = tun->write_fds;
+}
+
+/* ******************************************************* */
+
+static uint8_t sock_ipver(zdtun_t *tun, zdtun_conn_t *conn) {
+  if(conn->proxy_mode == PROXY_DNAT)
+    return tun->dnat.ipver;
+  else if(conn->proxy_mode == PROXY_SOCKS5)
+    return tun->socks5.ipver;
+  else
+    return conn->tuple.ipver;
 }
 
 /* ******************************************************* */
@@ -285,9 +304,9 @@ void* zdtun_userdata(zdtun_t *tun) {
 
 void zdtun_set_socks5_proxy(zdtun_t *tun, const zdtun_ip_t *proxy_ip,
         uint16_t proxy_port, uint8_t ipver) {
-  tun->socks5.proxy_ip = *proxy_ip;
-  tun->socks5.proxy_port = proxy_port;
-  tun->socks5.proxy_ipver = ipver;
+  tun->socks5.ip = *proxy_ip;
+  tun->socks5.port = proxy_port;
+  tun->socks5.ipver = ipver;
 }
 
 /* ******************************************************* */
@@ -318,8 +337,12 @@ socket_t zdtun_conn_get_socket(const zdtun_conn_t *conn) {
 }
 
 void zdtun_conn_proxy(zdtun_conn_t *conn) {
-  if((conn->socks5_status == SOCKS5_DISABLED) && (conn->tuple.ipproto == IPPROTO_TCP))
-    conn->socks5_status = SOCKS5_ENABLED;
+  if(conn->tuple.ipproto == IPPROTO_TCP)
+    conn->proxy_mode = PROXY_SOCKS5;
+}
+
+void zdtun_conn_dnat(zdtun_conn_t *conn) {
+  conn->proxy_mode = PROXY_DNAT;
 }
 
 /* ******************************************************* */
@@ -613,7 +636,7 @@ static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
   FD_CLR(conn->sock, &tun->write_fds);
   conn->status = CONN_STATUS_CONNECTED;
 
-  if(conn->socks5_status != SOCKS5_DISABLED) {
+  if(conn->proxy_mode == PROXY_SOCKS5) {
     // wait before sending the SYN+ACK
     return socks5_connect(tun, conn);
   }
@@ -856,21 +879,28 @@ void zdtun_set_mtu(zdtun_t *tun, int mtu) {
 
 static void fill_conn_sockaddr(zdtun_t *tun, zdtun_conn_t *conn,
         struct sockaddr_in6 *addr6, socklen_t *addrlen) {
-  uint8_t proxy = (conn->socks5_status != SOCKS5_DISABLED);
   uint8_t ipver = sock_ipver(tun, conn);
+  proxy_t *proxy;
+
+  if(conn->proxy_mode == PROXY_DNAT)
+    proxy = &tun->dnat;
+  else if(conn->proxy_mode == PROXY_SOCKS5)
+    proxy = &tun->socks5;
+  else
+    proxy = NULL;
 
   if(ipver == 4) {
     // struct sockaddr_in is smaller than struct sockaddr_in6
     struct sockaddr_in *addr4 = (struct sockaddr_in*)addr6;
 
     addr4->sin_family = AF_INET;
-    addr4->sin_addr.s_addr = proxy ? tun->socks5.proxy_ip.ip4 : conn->tuple.dst_ip.ip4;
-    addr4->sin_port = proxy ? tun->socks5.proxy_port : conn->tuple.dst_port;
+    addr4->sin_addr.s_addr = proxy ? tun->socks5.ip.ip4 : conn->tuple.dst_ip.ip4;
+    addr4->sin_port = proxy ? proxy->port : conn->tuple.dst_port;
     *addrlen = sizeof(struct sockaddr_in);
   } else {
     addr6->sin6_family = AF_INET6;
-    addr6->sin6_addr = proxy ? tun->socks5.proxy_ip.ip6 : conn->tuple.dst_ip.ip6;
-    addr6->sin6_port = proxy ? tun->socks5.proxy_port : conn->tuple.dst_port;
+    addr6->sin6_addr = proxy ? proxy->ip.ip6 : conn->tuple.dst_ip.ip6;
+    addr6->sin6_port = proxy ? proxy->port : conn->tuple.dst_port;
     *addrlen = sizeof(struct sockaddr_in6);
   }
 }
