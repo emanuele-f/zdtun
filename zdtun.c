@@ -35,8 +35,8 @@
 #define UDP_HEADER_LEN 8
 
 #define ICMP_TIMEOUT_SEC 5
-#define UDP_TIMEOUT_SEC 15
-#define TCP_TIMEOUT_SEC 30
+#define UDP_TIMEOUT_SEC 30
+#define TCP_TIMEOUT_SEC 60
 
 #ifdef WIN32
   // 64 is the per-thread limit on Winsocks
@@ -362,7 +362,7 @@ zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
   }
 
   tun->user_data = udata;
-  tun->mtu = 1486;
+  tun->mtu = 1500;
   memcpy(&tun->callbacks, callbacks, sizeof(tun->callbacks));
 
   FD_ZERO(&tun->all_fds);
@@ -905,6 +905,12 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   int family = (conn->tuple.ipver == 4) ? PF_INET : PF_INET6;
   int val;
 
+  if(data->th_flags & TH_URG) {
+    error("URG data not supported");
+    close_conn(tun, conn, CONN_STATUS_ERROR);
+    return -1;
+  }
+
   if(conn->status == CONN_STATUS_CONNECTING) {
     debug("ignore TCP packet, we are connecting");
     return 0;
@@ -926,6 +932,12 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
         return -1;
       }
     }
+
+    // Disable Nagle algorithm. We will manually buffer data with MSG_MORE
+    // when needed.
+    val = 1;
+    if(setsockopt(tcp_sock, SOL_TCP, TCP_NODELAY, &val, sizeof(val)) < 0)
+      error("setsockopt TCP_NODELAY failed");
 
     // Setup for the connection
     struct sockaddr_in6 servaddr = {0};
@@ -1459,8 +1471,20 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     return -1;
   }
 
+  int flags = TH_ACK;
+
+#ifndef WIN32
+  // Since we cannot determine server message bounds, we assume that
+  // message ends when no more data is available in the socket buffer.
+  int count = 0;
+  ioctl(conn->sock, FIONREAD, &count);
+
+  if(count == 0)
+    flags |= TH_PUSH;
+#endif
+
   // NAT back the TCP port and reconstruct the TCP header
-  build_reply_tcpip(tun, conn, TH_PUSH | TH_ACK, l4_len, 0);
+  build_reply_tcpip(tun, conn, flags, l4_len, 0);
 
   if(send_to_client(tun, conn, l4_len + MIN_TCP_HEADER_LEN) == 0) {
     conn->tcp.zdtun_seq += l4_len;
