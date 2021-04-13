@@ -2,7 +2,7 @@
  * Zero Dep Tunnel: VPN library without dependencies
  * ----------------------------------------------------------------------------
  *
- * Copyright (C) 2018 - Emanuele Faranda
+ * Copyright (C) 2018-21 - Emanuele Faranda
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -488,7 +488,7 @@ const char* zdtun_conn_status2str(zdtun_conn_status_t status);
  * Set a socks5 proxy. Individual connections to proxy must be marked
  * by calling zdtun_conn_proxy.
  */
-void zdtun_set_socks5_proxy(zdtun_t *tun, const zdtun_ip_t *proxy_ip, uint16_t proxy_port);
+void zdtun_set_socks5_proxy(zdtun_t *tun, const zdtun_ip_t *proxy_ip, uint16_t proxy_port, uint8_t ipver);
 
 /* Connection methods */
 void* zdtun_conn_get_userdata(const zdtun_conn_t *conn);

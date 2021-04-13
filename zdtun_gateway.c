@@ -65,7 +65,7 @@
 
 static int tun_fd;
 static uint8_t running;
-static uint8_t proxy_enabled = 0;
+static uint8_t proxy_ipver = 0;
 
 /* ******************************************************* */
 
@@ -109,7 +109,7 @@ static zdtun_conn_t* data_out(zdtun_t *tun, const char *pkt_buf, int pkt_len) {
     return NULL;
   }
 
-  if(proxy_enabled && (pkt.tuple.ipproto == IPPROTO_TCP))
+  if((proxy_ipver != 0) && (pkt.tuple.ipproto == IPPROTO_TCP))
     zdtun_conn_proxy(conn);
 
   if(zdtun_forward(tun, &pkt, conn) != 0) {
@@ -243,7 +243,7 @@ int main(int argc, char **argv) {
     if((proxy_port <= 0) || (proxy_port > 65535))
       usage(argv);
 
-    proxy_enabled = 1;
+    proxy_ipver = (af == AF_INET) ? 4 : 6;
   }
 
   if(!(pkt_buf = (char*) malloc(PACKET_BUFSIZE)))
@@ -255,8 +255,8 @@ int main(int argc, char **argv) {
   if(!tun)
     fatal("zdtun_init failed");
 
-  if(proxy_enabled)
-    zdtun_set_socks5_proxy(tun, &proxy_ip, proxy_port);
+  if(proxy_ipver != 0)
+    zdtun_set_socks5_proxy(tun, &proxy_ip, proxy_port, proxy_ipver);
 
   setup_zdtun_routing();
   signal(SIGPIPE, SIG_IGN);
