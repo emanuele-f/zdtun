@@ -26,7 +26,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <errno.h>
 #include <string.h>
 #include <time.h>
@@ -494,7 +493,6 @@ void zdtun_set_socks5_proxy(zdtun_t *tun, const zdtun_ip_t *proxy_ip, uint16_t p
 /* Connection methods */
 void* zdtun_conn_get_userdata(const zdtun_conn_t *conn);
 void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata);
-int zdtun_conn_dnat(zdtun_conn_t *conn, const zdtun_ip_t *dest_ip, uint16_t dest_port);
 void zdtun_conn_proxy(zdtun_conn_t *conn);
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
 time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);

@@ -64,8 +64,8 @@
 /* ******************************************************* */
 
 static int tun_fd;
-static bool running;
-static bool proxy_enabled = false;
+static uint8_t running;
+static uint8_t proxy_enabled = 0;
 
 /* ******************************************************* */
 
@@ -165,7 +165,7 @@ static void protect_socket(zdtun_t *tun, socket_t sock) {
 static void term_handler(int signo) {
   if(running) {
     printf("Shutting down...\n");
-    running = false;
+    running = 0;
   } else {
     printf("Leaving now\n");
     exit(0);
@@ -243,7 +243,7 @@ int main(int argc, char **argv) {
     if((proxy_port <= 0) || (proxy_port > 65535))
       usage(argv);
 
-    proxy_enabled = true;
+    proxy_enabled = 1;
   }
 
   if(!(pkt_buf = (char*) malloc(PACKET_BUFSIZE)))
@@ -263,7 +263,7 @@ int main(int argc, char **argv) {
   signal(SIGINT, term_handler);
 
   last_purge = time(NULL);
-  running = true;
+  running = 1;
   printf("zdtun running\n");
 
   while(running) {

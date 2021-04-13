@@ -60,25 +60,19 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t sta
 
 typedef struct {
   uint16_t len;
-  bool push;
+  uint8_t push;
   char data[];
 } partial_segment_t;
 
 /* ******************************************************* */
-
-typedef struct zdtun_dnat {
-  zdtun_ip_t ip;
-  u_int16_t port;
-} zdtun_dnat_t;
 
 typedef struct zdtun_conn {
   zdtun_5tuple_t tuple;
   time_t tstamp;
   socket_t sock;
   zdtun_conn_status_t status;
-  uint8_t socks5_status;
+  socks5_t socks5_status;
   uint8_t socks5_skip;
-  zdtun_dnat_t *dnat;
 
   struct {
     partial_segment_t *partial_send;
@@ -87,8 +81,11 @@ typedef struct zdtun_conn {
     u_int32_t window_size;   // scaled client window size
     u_int16_t mss;           // client MSS
     u_int8_t window_scale;   // client/zdtun TCP window scale
-    bool fin_ack_sent;
-    bool client_closed;
+
+    struct {
+      uint8_t fin_ack_sent:1;
+      uint8_t client_closed:1;
+    };
   } tcp;
 
   struct {
@@ -298,27 +295,6 @@ void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata) {
   conn->user_data = userdata;
 }
 
-// TODO allow DNAT to different IP version
-// TODO only allow DNAT to a single IP to reduce memory, see tun->socks5
-int zdtun_conn_dnat(zdtun_conn_t *conn, const zdtun_ip_t *dest_ip, uint16_t dest_port) {
-  zdtun_dnat_t *dnat = (zdtun_dnat_t*) malloc(sizeof(zdtun_dnat_t));
-
-  if(dnat == NULL) {
-    error("malloc(zdtun_dnat_t) failed");
-    return -1;
-  }
-
-  dnat->ip = *dest_ip;
-  dnat->port = dest_port;
-
-  if(conn->dnat)
-    free(conn->dnat);
-
-  conn->dnat = dnat;
-
-  return 0;
-}
-
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn) {
   return &conn->tuple;
 }
@@ -336,7 +312,7 @@ socket_t zdtun_conn_get_socket(const zdtun_conn_t *conn) {
 }
 
 void zdtun_conn_proxy(zdtun_conn_t *conn) {
-  if(conn->socks5_status == SOCKS5_DISABLED)
+  if((conn->socks5_status == SOCKS5_DISABLED) && (conn->tuple.ipproto == IPPROTO_TCP))
     conn->socks5_status = SOCKS5_ENABLED;
 }
 
@@ -396,7 +372,7 @@ static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
     error("send_client failed [%d]", rv);
 
     // important: set this to prevent close_conn to call send_to_client again in a loop
-    conn->tcp.fin_ack_sent = true;
+    conn->tcp.fin_ack_sent = 1;
 
     close_conn(tun, conn, CONN_STATUS_CLIENT_ERROR);
   }
@@ -578,9 +554,6 @@ void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
       tun->stats.num_icmp_conn--;
       break;
   }
-
-  if(conn->dnat)
-    free(conn->dnat);
 
   HASH_DELETE(hh, tun->conn_table, conn);
   free(conn);
@@ -874,20 +847,22 @@ void zdtun_set_mtu(zdtun_t *tun, int mtu) {
 
 /* ******************************************************* */
 
-static void fill_conn_sockaddr(zdtun_conn_t *conn,
+static void fill_conn_sockaddr(zdtun_t *tun, zdtun_conn_t *conn,
         struct sockaddr_in6 *addr6, socklen_t *addrlen) {
+  uint8_t proxy = (conn->socks5_status != SOCKS5_DISABLED);
+
   if(conn->tuple.ipver == 4) {
     // struct sockaddr_in is smaller than struct sockaddr_in6
     struct sockaddr_in *addr4 = (struct sockaddr_in*)addr6;
 
     addr4->sin_family = AF_INET;
-    addr4->sin_addr.s_addr = conn->dnat ? conn->dnat->ip.ip4 : conn->tuple.dst_ip.ip4;
-    addr4->sin_port = conn->dnat ? conn->dnat->port : conn->tuple.dst_port;
+    addr4->sin_addr.s_addr = proxy ? tun->socks5.proxy_ip.ip4 : conn->tuple.dst_ip.ip4;
+    addr4->sin_port = proxy ? tun->socks5.proxy_port : conn->tuple.dst_port;
     *addrlen = sizeof(struct sockaddr_in);
   } else {
     addr6->sin6_family = AF_INET6;
-    addr6->sin6_addr = conn->dnat ? conn->dnat->ip.ip6 : conn->tuple.dst_ip.ip6;
-    addr6->sin6_port = conn->dnat ? conn->dnat->port : conn->tuple.dst_port;
+    addr6->sin6_addr = proxy ? tun->socks5.proxy_ip.ip6 : conn->tuple.dst_ip.ip6;
+    addr6->sin6_port = proxy ? tun->socks5.proxy_port : conn->tuple.dst_port;
     *addrlen = sizeof(struct sockaddr_in6);
   }
 }
@@ -926,13 +901,6 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
     conn->sock = tcp_sock;
 
-    if(conn->socks5_status != SOCKS5_DISABLED) {
-      if(zdtun_conn_dnat(conn, &tun->socks5.proxy_ip, tun->socks5.proxy_port) != 0) {
-        close_conn(tun, conn, CONN_STATUS_ERROR);
-        return -1;
-      }
-    }
-
     // Disable Nagle algorithm. We will manually buffer data with MSG_MORE
     // when needed.
     val = 1;
@@ -942,7 +910,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     // Setup for the connection
     struct sockaddr_in6 servaddr = {0};
     socklen_t addrlen;
-    fill_conn_sockaddr(conn, &servaddr, &addrlen);
+    fill_conn_sockaddr(tun, conn, &servaddr, &addrlen);
 
 #ifdef WIN32
     unsigned nonblocking = 1;
@@ -954,7 +922,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       error("Cannot set socket non blocking: %d", errno);
 #endif
 
-    bool in_progress = false;
+    uint8_t in_progress = 0;
 
     // Account the SYN
     if(tun->callbacks.account_packet)
@@ -1000,7 +968,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     if(connect(tcp_sock, (struct sockaddr *) &servaddr, addrlen) == SOCKET_ERROR) {
       if(socket_errno == socket_in_progress) {
         debug("Connection in progress");
-        in_progress = true;
+        in_progress = 1;
       } else {
         close_with_socket_error(tun, conn, "TCP connect");
         return 0;
@@ -1058,7 +1026,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     }
 
     conn->tcp.client_seq += ((uint32_t)pkt->l7_len) + 1;
-    conn->tcp.client_closed = true;
+    conn->tcp.client_closed = 1;
 
     // send the ACK
     build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
@@ -1229,7 +1197,7 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
 
   struct sockaddr_in6 servaddr = {0};
   socklen_t addrlen;
-  fill_conn_sockaddr(conn, &servaddr, &addrlen);
+  fill_conn_sockaddr(tun, conn, &servaddr, &addrlen);
 
   if(sendto(conn->sock, pkt->l7, pkt->l7_len, 0, (struct sockaddr*)&servaddr, addrlen) < 0) {
     close_with_socket_error(tun, conn, "UDP sendto");
@@ -1284,7 +1252,7 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
 
   struct sockaddr_in6 servaddr = {0};
   socklen_t addrlen;
-  fill_conn_sockaddr(conn, &servaddr, &addrlen);
+  fill_conn_sockaddr(tun, conn, &servaddr, &addrlen);
 
   if(sendto(conn->sock, data, icmp_len, 0, (struct sockaddr*)&servaddr, addrlen) < 0) {
     close_with_socket_error(tun, conn, "ICMP sendto");
@@ -1436,7 +1404,7 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
     if(!conn->tcp.fin_ack_sent) {
       tcp_socket_fin_ack(tun, conn);
-      conn->tcp.fin_ack_sent = true;
+      conn->tcp.fin_ack_sent = 1;
     }
 
     // close the socket, otherwise select will keep triggering
