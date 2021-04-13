@@ -311,6 +311,15 @@ void zdtun_set_socks5_proxy(zdtun_t *tun, const zdtun_ip_t *proxy_ip,
 
 /* ******************************************************* */
 
+void zdtun_set_dnat_info(zdtun_t *tun, const zdtun_ip_t *proxy_ip,
+        uint16_t proxy_port, uint8_t ipver) {
+  tun->dnat.ip = *proxy_ip;
+  tun->dnat.port = proxy_port;
+  tun->dnat.ipver = ipver;
+}
+
+/* ******************************************************* */
+
 /* Connection methods */
 void* zdtun_conn_get_userdata(const zdtun_conn_t *conn) {
   return conn->user_data;
