@@ -903,7 +903,7 @@ static void fill_conn_sockaddr(zdtun_t *tun, zdtun_conn_t *conn,
     struct sockaddr_in *addr4 = (struct sockaddr_in*)addr6;
 
     addr4->sin_family = AF_INET;
-    addr4->sin_addr.s_addr = proxy ? tun->socks5.ip.ip4 : conn->tuple.dst_ip.ip4;
+    addr4->sin_addr.s_addr = proxy ? proxy->ip.ip4 : conn->tuple.dst_ip.ip4;
     addr4->sin_port = proxy ? proxy->port : conn->tuple.dst_port;
     *addrlen = sizeof(struct sockaddr_in);
   } else {
