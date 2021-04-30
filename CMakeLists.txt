@@ -6,7 +6,7 @@ project(C)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
 if(ANDROID)
-  ADD_LIBRARY(zdtun SHARED zdtun.c utils.c)
+  ADD_LIBRARY(zdtun STATIC zdtun.c utils.c)
 
   TARGET_LINK_LIBRARIES(zdtun)
   add_definitions(-DANDROID)
