@@ -404,8 +404,14 @@ static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
   int rv = tun->callbacks.send_client(tun, tun->reply_buf, size, conn);
 
   if(rv == 0) {
-    if(tun->callbacks.account_packet)
-      tun->callbacks.account_packet(tun, tun->reply_buf, size, 0 /* from zdtun */, conn);
+    if(tun->callbacks.account_packet) {
+      zdtun_pkt_t pkt;
+
+      if(zdtun_parse_pkt(tun->reply_buf, size, &pkt) < 0) {
+        error("zdtun_parse_pkt failed, this should never happen");
+      } else
+        tun->callbacks.account_packet(tun, &pkt, 0 /* from zdtun */, conn);
+    }
   } else {
     error("send_client failed [%d]", rv);
 
@@ -818,7 +824,7 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
   pkt->l3 = pkt_buf;
   pkt->tuple.ipproto = ipproto;
   pkt->tuple.ipver = ipver;
-  pkt->pkt_len = pkt_len;
+  pkt->len = pkt_len;
   pkt->ip_hdr_len = iphdr_len;
   pkt->l4 = &pkt_buf[iphdr_len];
 
@@ -973,7 +979,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
     // Account the SYN
     if(tun->callbacks.account_packet)
-      tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
+      tun->callbacks.account_packet(tun, pkt, 1 /* to zdtun */, conn);
 
     // TCP options
     uint8_t optslen = data->th_off * 4 - TCP_HEADER_LEN;
@@ -1035,7 +1041,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
   // Here a connection is already active
   if(tun->callbacks.account_packet)
-     tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
+     tun->callbacks.account_packet(tun, pkt, 1 /* to zdtun */, conn);
 
   uint32_t seq = ntohl(data->th_seq);
   uint8_t is_keep_alive = ((data->th_flags & TH_ACK) &&
@@ -1241,7 +1247,7 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
   }
 
   if(tun->callbacks.account_packet)
-    tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
+    tun->callbacks.account_packet(tun, pkt, 1 /* to zdtun */, conn);
 
   struct sockaddr_in6 servaddr = {0};
   socklen_t addrlen;
@@ -1296,7 +1302,7 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
           data->un.echo.sequence, data->type, data->code);
 
   if(tun->callbacks.account_packet)
-    tun->callbacks.account_packet(tun, pkt->buf, pkt->pkt_len, 1 /* to zdtun */, conn);
+    tun->callbacks.account_packet(tun, pkt, 1 /* to zdtun */, conn);
 
   struct sockaddr_in6 servaddr = {0};
   socklen_t addrlen;

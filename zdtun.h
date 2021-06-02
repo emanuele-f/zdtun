@@ -214,7 +214,7 @@ typedef struct zdtun_conn zdtun_conn_t;
 typedef struct zdtun_pkt {
   zdtun_5tuple_t tuple;
 
-  u_int16_t pkt_len;
+  u_int16_t len;
   u_int16_t ip_hdr_len;
   u_int16_t l4_hdr_len;
   u_int16_t l7_len;
@@ -279,12 +279,11 @@ typedef struct zdtun_callbacks {
    * @brief A callback to easily account packets exchanged between the pivot and zdtun.
    *
    * @param tun the zdtun instance
-   * @param pkt_buf the buffer pointing to IP header and data
-   * @param pkt_size the total size of the IP packet
+   * @param pkt the packet to account
    * @param to_zdtun 1 if the packet is generated from the pivot, false otherwise
    * @param conn_info contains information about the connection
    */
-  void (*account_packet) (zdtun_t *tun, const char *pkt_buf, int pkt_size, uint8_t to_zdtun, const zdtun_conn_t *conn_info);
+  void (*account_packet) (zdtun_t *tun, const struct zdtun_pkt *pkt, uint8_t to_zdtun, const zdtun_conn_t *conn_info);
 
   /*
    * @brief Called whenever a new socket is opened.
