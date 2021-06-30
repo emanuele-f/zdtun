@@ -872,8 +872,15 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
     }
 
     pkt->l4_hdr_len = sizeof(struct icmphdr);
-    pkt->tuple.echo_id = data->un.echo.id;
-    pkt->tuple.dst_port = 0;
+
+    // NOTE: echo ID in the source port is the same convention used by linux for ICMP connections
+    if(data->type == ICMP_ECHO) {
+      pkt->tuple.echo_id = data->un.echo.id;
+      pkt->tuple.dst_port = 0;
+    } else {
+      pkt->tuple.echo_id = 0;
+      pkt->tuple.dst_port = data->un.echo.id;
+    }
   } else {
     debug("Packet with unknown protocol: %u", ipproto);
     return -3;
