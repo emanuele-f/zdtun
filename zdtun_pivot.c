@@ -236,5 +236,5 @@ int main(int argc, char **argv) {
 
   free(buffer);
   closesocket(sock);
-  ztdun_finalize(tun);
+  zdtun_finalize(tun);
 }

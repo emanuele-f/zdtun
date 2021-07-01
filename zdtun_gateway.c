@@ -89,8 +89,13 @@ static int data_in(zdtun_t *tun, char *pkt_buf, int pkt_size, const zdtun_conn_t
 static zdtun_conn_t* data_out(zdtun_t *tun, const char *pkt_buf, int pkt_len) {
   zdtun_pkt_t pkt;
 
-  if(zdtun_parse_pkt(pkt_buf, pkt_len, &pkt) != 0) {
+  if(zdtun_parse_pkt(tun, pkt_buf, pkt_len, &pkt) != 0) {
     debug("zdtun_parse_pkt failed");
+    return NULL;
+  }
+
+  if(pkt.flags & ZDTUN_PKT_IS_FRAGMENT) {
+    debug("discarding IP fragment");
     return NULL;
   }
 
@@ -311,7 +316,7 @@ int main(int argc, char **argv) {
 
   // cleanup
   cleanup_zdtun_routing();
-  ztdun_finalize(tun);
+  zdtun_finalize(tun);
   free(pkt_buf);
 
   return(0);

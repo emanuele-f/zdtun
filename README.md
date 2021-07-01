@@ -85,7 +85,7 @@ int main() {
     }
   }
 
-  ztdun_finalize(tun);
+  zdtun_finalize(tun);
 }
 ```
 

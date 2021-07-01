@@ -208,12 +208,16 @@ typedef PACK_ON struct zdtun_5tuple {
  */
 typedef struct zdtun_conn zdtun_conn_t;
 
+#define ZDTUN_PKT_IS_FRAGMENT 1
+#define ZDTUN_PKT_IS_FIRST_FRAGMENT 2
+
 /*
  * @brief a container for a packet metadata.
  */
 typedef struct zdtun_pkt {
   zdtun_5tuple_t tuple;
 
+  u_int8_t flags;
   u_int16_t len;
   u_int16_t ip_hdr_len;
   u_int16_t l4_hdr_len;
@@ -342,7 +346,7 @@ void* zdtun_userdata(zdtun_t *tun);
  *
  * @param tun the zdtun instance to destroy.
  */
-void ztdun_finalize(zdtun_t *tun);
+void zdtun_finalize(zdtun_t *tun);
 
 /*
  * @brief Get zdtun file descriptors, suitable for a select.
@@ -403,13 +407,14 @@ int zdtun_get_num_connections(zdtun_t *tun);
 /*
  * Parse a packet and populate the zdtun_pkt_t structure with its metadata.
  *
+ * @param tun a zdtun instance.
  * @param pkt_buf buffer pointing to IP header and data.
  * @param pkt_len total size of the IP packet.
  * @param pinfo pointer to the output structure.
  *
  * @return 0 on success, error code otherwise.
  */
-int zdtun_parse_pkt(const char *pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pinfo);
+int zdtun_parse_pkt(zdtun_t *tun, const char *pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pinfo);
 
 /*
  * Set the virtual MTU. It is used to determine the MSS.

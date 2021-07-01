@@ -78,6 +78,14 @@ typedef struct {
 
 /* ******************************************************* */
 
+// used to resolve port numbers for IP fragments
+typedef struct {
+  uint16_t sport;
+  uint16_t dport;
+} ip_frag_ports_t;
+
+/* ******************************************************* */
+
 typedef struct zdtun_conn {
   zdtun_5tuple_t tuple;
   time_t tstamp;
@@ -119,6 +127,7 @@ typedef struct zdtun_t {
   fd_set write_fds;
   uint32_t mtu;
   zdtun_statistics_t stats;
+  ip_frag_ports_t id2ports[65536];
   char reply_buf[REPLY_BUF_SIZE];
 
   proxy_t socks5;
@@ -387,7 +396,7 @@ zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata) {
 
 /* ******************************************************* */
 
-void ztdun_finalize(zdtun_t *tun) {
+void zdtun_finalize(zdtun_t *tun) {
   zdtun_conn_t *conn, *tmp;
 
   HASH_ITER(hh, tun->conn_table, conn, tmp) {
@@ -407,7 +416,7 @@ static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
     if(tun->callbacks.account_packet) {
       zdtun_pkt_t pkt;
 
-      if(zdtun_parse_pkt(tun->reply_buf, size, &pkt) < 0) {
+      if(zdtun_parse_pkt(tun, tun->reply_buf, size, &pkt) < 0) {
         error("zdtun_parse_pkt failed, this should never happen");
       } else
         tun->callbacks.account_packet(tun, &pkt, 0 /* from zdtun */, conn);
@@ -768,8 +777,8 @@ static int is_upper_layer(int proto) {
 
 /* ******************************************************* */
 
-int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
-  if(pkt_len < TCP_HEADER_LEN) {
+int zdtun_parse_pkt(zdtun_t *tun, const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
+  if (pkt_len < IPV4_HEADER_LEN) {
     debug("Ignoring non IP packet (len: %d)", pkt_len);
     return -1;
   }
@@ -798,6 +807,15 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
     pkt->tuple.src_ip.ip4 = ip_header->saddr;
     pkt->tuple.dst_ip.ip4 = ip_header->daddr;
     ipproto = ip_header->protocol;
+
+    if (ip_header->frag_off & htons(0x1FFF)) {
+      // this an IP fragment (not the first one)
+      pkt->flags |= ZDTUN_PKT_IS_FRAGMENT;
+    } else if (ip_header->frag_off & htons(0x2000)) { // IP_MF
+      // this the first IP fragment
+      pkt->flags |= ZDTUN_PKT_IS_FRAGMENT;
+      pkt->flags |= ZDTUN_PKT_IS_FIRST_FRAGMENT;
+    }
   } else {
     struct ipv6_hdr *ip_header = (struct ipv6_hdr*) pkt_buf;
 
@@ -828,7 +846,23 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
   pkt->ip_hdr_len = iphdr_len;
   pkt->l4 = &pkt_buf[iphdr_len];
 
-  if(ipproto == IPPROTO_TCP) {
+  if((pkt->flags & ZDTUN_PKT_IS_FRAGMENT) &&
+     !(pkt->flags & ZDTUN_PKT_IS_FIRST_FRAGMENT)) {
+    // this an IP fragment (not the first one)
+    ip_frag_ports_t *ports = &tun->id2ports[pkt->ip4->id];
+
+    // may be 0
+    pkt->tuple.src_port = ports->sport;
+    pkt->tuple.dst_port = ports->dport;
+    pkt->l4_hdr_len = 0;
+
+    if(!(pkt->ip4->frag_off & htons(0x2000))) { // !IP_MF
+      // this is the last fragment. Reset the ports to avoid matching unrelated fragments.
+      // This assumes that the previous fragments are not lost and retransmitted afterwards.
+      ports->sport = 0;
+      ports->dport = 0;
+    }
+  } else if(ipproto == IPPROTO_TCP) {
     struct tcphdr *data = pkt->tcp;
     int32_t tcp_header_len;
 
@@ -884,6 +918,14 @@ int zdtun_parse_pkt(const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
   } else {
     debug("Packet with unknown protocol: %u", ipproto);
     return -3;
+  }
+
+  if(pkt->flags & ZDTUN_PKT_IS_FIRST_FRAGMENT) {
+    // save the ports to restore them on the next fragments
+    // Assumption: the IP ID field of different connections does not collide
+    ip_frag_ports_t *ports = &tun->id2ports[pkt->ip4->id];
+    ports->sport = pkt->tuple.src_port;
+    ports->dport = pkt->tuple.dst_port;
   }
 
   pkt->l7_len = pkt_len - iphdr_len - pkt->l4_hdr_len;
@@ -1375,8 +1417,13 @@ int zdtun_send_oob(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
 zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, int pkt_len) {
   zdtun_pkt_t pkt;
 
-  if(zdtun_parse_pkt(pkt_buf, pkt_len, &pkt) != 0) {
+  if(zdtun_parse_pkt(tun, pkt_buf, pkt_len, &pkt) != 0) {
     debug("zdtun_easy_forward: zdtun_parse_pkt failed");
+    return NULL;
+  }
+
+  if(pkt.flags & ZDTUN_PKT_IS_FRAGMENT) {
+    debug("TCP: ignoring fragmented IP");
     return NULL;
   }
 
