@@ -127,6 +127,7 @@ typedef struct zdtun_t {
   fd_set write_fds;
   uint32_t mtu;
   zdtun_statistics_t stats;
+  time_t now;
   ip_frag_ports_t id2ports[65536];
   char reply_buf[REPLY_BUF_SIZE];
 
@@ -307,6 +308,19 @@ static int close_with_socket_error(zdtun_t *tun, zdtun_conn_t *conn, const char 
 
 void* zdtun_userdata(zdtun_t *tun) {
   return(tun->user_data);
+}
+
+/* ******************************************************* */
+
+static time_t zdtun_now(zdtun_t *tun) {
+  struct timespec ts;
+
+  if(!clock_gettime(CLOCK_MONOTONIC_COARSE, &ts))
+    tun->now = ts.tv_sec;
+  else
+    error("clock_gettime failed");
+
+  return tun->now;
 }
 
 /* ******************************************************* */
@@ -687,14 +701,14 @@ zdtun_conn_t* zdtun_lookup(zdtun_t *tun, const zdtun_5tuple_t *tuple, uint8_t cr
   if(!conn && create) {
     if(tun->stats.num_open_sockets >= MAX_NUM_SOCKETS) {
       debug("Force purge!");
-      zdtun_purge_expired(tun, time(NULL));
+      zdtun_purge_expired(tun);
     }
 
     /* Add a new connection */
     safe_alloc(conn, zdtun_conn_t);
     conn->sock = INVALID_SOCKET;
     conn->tuple = *tuple;
-    conn->tstamp = time(NULL);
+    conn->tstamp = zdtun_now(tun);
 
     if(tun->callbacks.on_connection_open) {
       if(tun->callbacks.on_connection_open(tun, conn) != 0) {
@@ -1391,7 +1405,7 @@ static int zdtun_forward_full(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t
   }
 
   if(rv == 0) {
-    conn->tstamp = time(NULL);
+    conn->tstamp = zdtun_now(tun);
 
     if(conn->status == CONN_STATUS_NEW)
       error("Connection status must not be CONN_STATUS_NEW here!");
@@ -1485,7 +1499,7 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   debug("ICMP.re[len=%d] id=%d seq=%d type=%d code=%d", icmp_len, data->un.echo.id,
           data->un.echo.sequence, data->type, data->code);
 
-  conn->tstamp = time(NULL);
+  conn->tstamp = zdtun_now(tun);
 
   data->checksum = 0;
   data->checksum = ~calc_checksum(data->checksum, (u_int8_t*)data, icmp_len);
@@ -1503,7 +1517,7 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   int to_recv = min(conn->tcp.window_size, conn->tcp.mss);
   int l4_len = recv(conn->sock, payload_ptr, to_recv, 0);
 
-  conn->tstamp = time(NULL);
+  conn->tstamp = zdtun_now(tun);
 
   if(l4_len == SOCKET_ERROR)
     return close_with_socket_error(tun, conn, "TCP recv");
@@ -1609,7 +1623,7 @@ static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
   if(rv == 0) {
     // ok
-    conn->tstamp = time(NULL);
+    conn->tstamp = zdtun_now(tun);
 
     check_dns_purge(tun, conn, payload_ptr, l4_len);
   }
@@ -1633,7 +1647,7 @@ static int handle_tcp_connect_async(zdtun_t *tun, zdtun_conn_t *conn) {
     if(optval == 0) {
       debug("TCP non-blocking socket connected");
       rv = tcp_socket_syn(tun, conn);
-      conn->tstamp = time(NULL);
+      conn->tstamp = zdtun_now(tun);
     } else {
       close_with_socket_error(tun, conn, "TCP non-blocking connect");
       rv = -1;
@@ -1726,8 +1740,9 @@ static inline int zdtun_conn_cmp_timestamp_asc(zdtun_conn_t *a, zdtun_conn_t *b)
 
 // purges old connections. Harvests the closed connections (set by close_conn)
 // and purges them (assuming no dangling pointers around).
-void zdtun_purge_expired(zdtun_t *tun, time_t now) {
+void zdtun_purge_expired(zdtun_t *tun) {
   zdtun_conn_t *conn, *tmp;
+  time_t now = zdtun_now(tun);
 
   /* Purge by idleness */
   HASH_ITER(hh, tun->conn_table, conn, tmp) {

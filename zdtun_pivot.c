@@ -226,7 +226,7 @@ int main(int argc, char **argv) {
       if(do_purge) {
         print_zdtun_stats(tun);
         last_purge = time(NULL);
-        zdtun_purge_expired(tun, last_purge);
+        zdtun_purge_expired(tun);
       }
     }
 

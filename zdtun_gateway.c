@@ -305,7 +305,7 @@ int main(int argc, char **argv) {
     }
 
     if((time(NULL) - last_purge) >= MAX_PURGE_SECS) {
-      zdtun_purge_expired(tun, last_purge);
+      zdtun_purge_expired(tun);
       last_purge = time(NULL);
     }
   }
