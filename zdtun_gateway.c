@@ -69,14 +69,14 @@ static uint8_t proxy_ipver = 0;
 
 /* ******************************************************* */
 
-static int data_in(zdtun_t *tun, char *pkt_buf, int pkt_size, const zdtun_conn_t *conn_info) {
-  int rv = write(tun_fd, pkt_buf, pkt_size);
+static int data_in(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *conn_info) {
+  int rv = write(tun_fd, pkt->buf, pkt->len);
 
   if(rv < 0) {
     error("write(tun) failed[%d]: %s", errno, strerror(errno));
     return(rv);
-  } else if(rv != pkt_size) {
-    error("write(tun): unexpected rv (expected %d, got %d)", pkt_size, rv);
+  } else if(rv != pkt->len) {
+    error("write(tun): unexpected rv (expected %d, got %d)", pkt->len, rv);
     return(rv);
   }
 

@@ -44,10 +44,10 @@ Here is how to use the zdtun api to integrate its VPN capabilities into an exist
 #include "zdtun.h"
 
 /* This is called when zdtun needs to send data to the client */
-int send_pivot_callback(zdtun_t *tun, const zdtun_conn_t *conn_info, char *pkt_buf, int pkt_size) {
+int send_pivot_callback(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *conn_info) {
   int cli_socket = *((int*) zdtun_userdata(tun));
 
-  send(cli_socket, pkt_buf, pkt_size, 0);
+  send(cli_socket, pkt->buf, pkt->len, 0);
 }
 
 int main() {

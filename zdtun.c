@@ -128,13 +128,13 @@ typedef struct zdtun_t {
   uint32_t mtu;
   zdtun_statistics_t stats;
   time_t now;
+  zdtun_pkt_t last_pkt; // store pkt here to prevent invalid memory access by subsequent API calls
   ip_frag_ports_t id2ports[65536];
   char reply_buf[REPLY_BUF_SIZE];
 
   proxy_t socks5;
   proxy_t dnat;
 
-  zdtun_conn_t *sock_2_conn;
   zdtun_conn_t *conn_table;
 } zdtun_t;
 
@@ -424,17 +424,17 @@ void zdtun_finalize(zdtun_t *tun) {
 
 static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
   int size = l3_len + ((sock_ipver(tun, conn) == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN);
-  int rv = tun->callbacks.send_client(tun, tun->reply_buf, size, conn);
+
+  if(zdtun_parse_pkt(tun, tun->reply_buf, size, &tun->last_pkt) < 0) {
+    error("zdtun_parse_pkt failed, this should never happen");
+    return -1;
+  }
+
+  int rv = tun->callbacks.send_client(tun, &tun->last_pkt, conn);
 
   if(rv == 0) {
-    if(tun->callbacks.account_packet) {
-      zdtun_pkt_t pkt;
-
-      if(zdtun_parse_pkt(tun, tun->reply_buf, size, &pkt) < 0) {
-        error("zdtun_parse_pkt failed, this should never happen");
-      } else
-        tun->callbacks.account_packet(tun, &pkt, 0 /* from zdtun */, conn);
-    }
+    if(tun->callbacks.account_packet)
+        tun->callbacks.account_packet(tun, &tun->last_pkt, 0 /* from zdtun */, conn);
   } else {
     error("send_client failed [%d]", rv);
 
