@@ -192,11 +192,11 @@ typedef PACK_ON struct zdtun_5tuple {
   zdtun_ip_t src_ip;
   zdtun_ip_t dst_ip;
 
+  // network byte order
   union {
     u_int16_t src_port;
     u_int16_t echo_id;
   };
-
   u_int16_t dst_port;
 
   u_int8_t ipver;
@@ -509,5 +509,19 @@ time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);
 zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn);
 socket_t zdtun_conn_get_socket(const zdtun_conn_t *conn);
 char* zdtun_5tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize);
+
+/* Internal API - subject to change */
+
+/*
+ * Returns the size of the IP header sent to the client.
+ */
+int zdtun_iphdr_len(zdtun_t *tun, zdtun_conn_t *conn);
+
+/*
+ * Builds the IP header for the given connection and writes it to pkt_buf.
+ * The buffer should be big enough to host the header, whose size can be retrieved via
+ * zdtun_iphdr_len.
+ */
+void zdtun_make_iphdr(zdtun_t *tun, zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len);
 
 #endif

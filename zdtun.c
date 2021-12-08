@@ -423,7 +423,7 @@ void zdtun_finalize(zdtun_t *tun) {
 /* ******************************************************* */
 
 static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
-  int size = l3_len + ((sock_ipver(tun, conn) == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN);
+  int size = l3_len + zdtun_iphdr_len(tun, conn);
 
   if(zdtun_parse_pkt(tun, tun->reply_buf, size, &tun->last_pkt) < 0) {
     error("zdtun_parse_pkt failed, this should never happen");
@@ -483,7 +483,13 @@ static int get_available_sndbuf(zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
-static void build_reply_ip(zdtun_t *tun, zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len) {
+int zdtun_iphdr_len(zdtun_t *tun, zdtun_conn_t *conn) {
+  return (sock_ipver(tun, conn) == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+}
+
+/* ******************************************************* */
+
+void zdtun_make_iphdr(zdtun_t *tun, zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len) {
   if(sock_ipver(tun, conn) == 4) {
     struct iphdr *ip = (struct iphdr*)pkt_buf;
     uint16_t tot_len = l3_len + IPV4_HEADER_LEN;
@@ -517,7 +523,7 @@ static void build_reply_ip(zdtun_t *tun, zdtun_conn_t *conn, char *pkt_buf, u_in
 static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
         u_int16_t l4_len, u_int16_t optsoff) {
   uint8_t ipver = sock_ipver(tun, conn);
-  int iphdr_len = (ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+  int iphdr_len = zdtun_iphdr_len(tun, conn);
   const u_int16_t l3_len = l4_len + TCP_HEADER_LEN + (optsoff * 4);
   struct tcphdr *tcp = (struct tcphdr *)&tun->reply_buf[iphdr_len];
   uint32_t max_win = ((uint32_t)0xFFFF) << conn->tcp.window_scale;
@@ -543,7 +549,7 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
 
   tcp->th_win = htons(tcpwin >> conn->tcp.window_scale);
 
-  build_reply_ip(tun, conn, tun->reply_buf, l3_len);
+  zdtun_make_iphdr(tun, conn, tun->reply_buf, l3_len);
   tcp->th_sum = calc_checksum(0, (uint8_t*)tcp, l3_len);
 
   if(ipver == 4) {
@@ -631,7 +637,7 @@ void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
 
 static int send_syn_ack(zdtun_t *tun, zdtun_conn_t *conn) {
   int rv;
-  int iphdr_len = (sock_ipver(tun, conn)) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+  int iphdr_len = zdtun_iphdr_len(tun, conn);
   uint8_t *opts = (uint8_t*) &tun->reply_buf[iphdr_len + TCP_HEADER_LEN];
 
   // MSS option
@@ -1470,7 +1476,7 @@ zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, int pkt_len)
 /* ******************************************************* */
 
 static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
-  int iphdr_len = (sock_ipver(tun, conn) == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+  int iphdr_len = zdtun_iphdr_len(tun, conn);
   int icmp_len = recv(conn->sock, tun->reply_buf + iphdr_len,
           REPLY_BUF_SIZE - iphdr_len, 0);
 
@@ -1504,7 +1510,7 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   data->checksum = 0;
   data->checksum = ~calc_checksum(data->checksum, (u_int8_t*)data, icmp_len);
 
-  build_reply_ip(tun, conn, tun->reply_buf, icmp_len);
+  zdtun_make_iphdr(tun, conn, tun->reply_buf, icmp_len);
 
   return send_to_client(tun, conn, icmp_len);
 }
@@ -1512,7 +1518,7 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 /* ******************************************************* */
 
 static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
-  int iphdr_len = (sock_ipver(tun, conn) == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+  int iphdr_len = zdtun_iphdr_len(tun, conn);
   char *payload_ptr = tun->reply_buf + iphdr_len + TCP_HEADER_LEN;
   int to_recv = min(conn->tcp.window_size, conn->tcp.mss);
   int l4_len = recv(conn->sock, payload_ptr, to_recv, 0);
@@ -1596,7 +1602,7 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 /* ******************************************************* */
 
 static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
-  int iphdr_len = (sock_ipver(tun, conn) == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+  int iphdr_len = zdtun_iphdr_len(tun, conn);
   char *payload_ptr = tun->reply_buf + iphdr_len + sizeof(struct udphdr);
   int l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE-iphdr_len-sizeof(struct udphdr), 0);
 
@@ -1617,7 +1623,7 @@ static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   // NOTE: UDP checksum not calculated, it is optional
   data->uh_sum = 0;
 
-  build_reply_ip(tun, conn, tun->reply_buf, l3_len);
+  zdtun_make_iphdr(tun, conn, tun->reply_buf, l3_len);
 
   int rv = send_to_client(tun, conn, l3_len);
 
