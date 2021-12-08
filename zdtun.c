@@ -520,6 +520,38 @@ void zdtun_make_iphdr(zdtun_t *tun, zdtun_conn_t *conn, char *pkt_buf, u_int16_t
 
 /* ******************************************************* */
 
+uint16_t zdtun_l3_checksum(zdtun_t *tun, zdtun_conn_t *conn, char *ipbuf, char *l3, uint16_t l3_len) {
+  uint8_t ipver = sock_ipver(tun, conn);
+  uint8_t ipproto = conn->tuple.ipproto;
+  uint16_t rv = calc_checksum(0, (uint8_t*)l3, l3_len);
+
+  if(ipver == 4) {
+    struct iphdr *ip_header = (struct iphdr*)ipbuf;
+    struct ippseudo pseudo = {0};
+
+    pseudo.ippseudo_src = ip_header->saddr;
+    pseudo.ippseudo_dst = ip_header->daddr;
+    pseudo.ippseudo_p = ipproto;
+    pseudo.ippseudo_len = htons(l3_len);
+
+    rv = calc_checksum(rv, (uint8_t*)&pseudo, sizeof(pseudo));
+  } else {
+    struct ipv6_hdr *ip_header = (struct ipv6_hdr*)ipbuf;
+    struct ip6_hdr_pseudo pseudo = {0};
+
+    pseudo.ip6ph_src = ip_header->saddr;
+    pseudo.ip6ph_dst = ip_header->daddr;
+    pseudo.ip6ph_len = ip_header->payload_len;
+    pseudo.ip6ph_nxt = ipproto;
+
+    rv = calc_checksum(rv, (uint8_t*)&pseudo, sizeof(pseudo));
+  }
+
+  return ~rv;
+}
+
+/* ******************************************************* */
+
 static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
         u_int16_t l4_len, u_int16_t optsoff) {
   uint8_t ipver = sock_ipver(tun, conn);
@@ -550,31 +582,7 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   tcp->th_win = htons(tcpwin >> conn->tcp.window_scale);
 
   zdtun_make_iphdr(tun, conn, tun->reply_buf, l3_len);
-  tcp->th_sum = calc_checksum(0, (uint8_t*)tcp, l3_len);
-
-  if(ipver == 4) {
-    struct iphdr *ip_header = (struct iphdr*)tun->reply_buf;
-    struct ippseudo pseudo = {0};
-
-    pseudo.ippseudo_src = ip_header->saddr;
-    pseudo.ippseudo_dst = ip_header->daddr;
-    pseudo.ippseudo_p = IPPROTO_TCP;
-    pseudo.ippseudo_len = htons(l3_len);
-
-    tcp->th_sum = calc_checksum(tcp->th_sum, (uint8_t*)&pseudo, sizeof(pseudo));
-  } else {
-    struct ipv6_hdr *ip_header = (struct ipv6_hdr*)tun->reply_buf;
-    struct ip6_hdr_pseudo pseudo = {0};
-
-    pseudo.ip6ph_src = ip_header->saddr;
-    pseudo.ip6ph_dst = ip_header->daddr;
-    pseudo.ip6ph_len = ip_header->payload_len;
-    pseudo.ip6ph_nxt = IPPROTO_TCP;
-
-    tcp->th_sum = calc_checksum(tcp->th_sum, (uint8_t*)&pseudo, sizeof(pseudo));
-  }
-
-  tcp->th_sum = ~tcp->th_sum;
+  tcp->th_sum = zdtun_l3_checksum(tun, conn, tun->reply_buf, (char*)tcp, l3_len);
 }
 
 /* ******************************************************* */
@@ -1620,10 +1628,12 @@ static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   // NAT back the UDP port
   data->uh_dport = conn->tuple.src_port;
 
-  // NOTE: UDP checksum not calculated, it is optional
-  data->uh_sum = 0;
-
   zdtun_make_iphdr(tun, conn, tun->reply_buf, l3_len);
+
+  // UDP checksum mandatory only for IPv6. Keep it 0 for IPv4 to speed up things.
+  data->uh_sum = 0;
+  if(sock_ipver(tun, conn) != 4)
+    data->uh_sum = zdtun_l3_checksum(tun, conn, tun->reply_buf, (char*)data, l3_len);
 
   int rv = send_to_client(tun, conn, l3_len);
 

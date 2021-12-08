@@ -524,4 +524,17 @@ int zdtun_iphdr_len(zdtun_t *tun, zdtun_conn_t *conn);
  */
 void zdtun_make_iphdr(zdtun_t *tun, zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len);
 
+/*
+ * Calculates the checksum for L3 headers (e.g. TCP, UDP).
+ *
+ * @param ipbuf pointer to the IP header
+ * @param l3 pointer to the L3 header
+ * @param l3_len size of the L3 header + L3 data
+ *
+ * @return the checksum
+ * @note this checksum should be calculated after the IP, L3 header and the payload is fixed.
+ *       Ensure to set the L3 header checksum to 0 before calling this function.
+ */
+uint16_t zdtun_l3_checksum(zdtun_t *tun, zdtun_conn_t *conn, char *ipbuf, char *l3, uint16_t l3_len);
+
 #endif
