@@ -51,7 +51,7 @@
 
 /* ******************************************************* */
 
-static void close_conn(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t status);
+static void destroy_conn(zdtun_t *tun, zdtun_conn_t *conn);
 
 #define default_mss(tun, conn) (tun->mtu - sizeof(struct tcphdr) -\
       ((sock_ipver(tun, conn) == 4) ? sizeof(struct iphdr) : sizeof(struct ipv6_hdr)))
@@ -300,7 +300,7 @@ static int close_with_socket_error(zdtun_t *tun, zdtun_conn_t *conn, const char 
     error("%s error[%d]: %s - %s", ctx, socket_errno, strerror(socket_errno), buf);
   }
 
-  close_conn(tun, conn, status);
+  zdtun_conn_close(tun, conn, status);
   return(rv);
 }
 
@@ -414,7 +414,7 @@ void zdtun_finalize(zdtun_t *tun) {
   zdtun_conn_t *conn, *tmp;
 
   HASH_ITER(hh, tun->conn_table, conn, tmp) {
-    zdtun_destroy_conn(tun, conn);
+    destroy_conn(tun, conn);
   }
 
   free(tun);
@@ -441,7 +441,7 @@ static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
     // important: set this to prevent close_conn to call send_to_client again in a loop
     conn->tcp.fin_ack_sent = 1;
 
-    close_conn(tun, conn, CONN_STATUS_CLIENT_ERROR);
+    zdtun_conn_close(tun, conn, CONN_STATUS_CLIENT_ERROR);
   }
 
   return(rv);
@@ -587,11 +587,11 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
 
 /* ******************************************************* */
 
-// It is used to defer the zdtun_destroy_conn function to let the user
+// It is used to defer the destroy_conn function to let the user
 // consume the connection without accessing invalid memory. The connections
 // will be (later) destroyed by zdtun_purge_expired.
 // May be called multiple times.
-static void close_conn(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t status) {
+void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t status) {
   if(conn->status >= CONN_STATUS_CLOSED)
     return;
 
@@ -618,12 +618,12 @@ static void close_conn(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t sta
 
 /* ******************************************************* */
 
-// Avoid calling zdtun_destroy_conn inside zdtun_forward_full as it may
+// Avoid calling destroy_conn inside zdtun_forward_full as it may
 // generate dangling pointers. Use close_conn instead.
-void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
+static void destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
   debug("PURGE SOCKET (type=%d)", conn->tuple.ipproto);
 
-  close_conn(tun, conn, CONN_STATUS_CLOSED);
+  zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
 
   switch(conn->tuple.ipproto) {
     case IPPROTO_TCP:
@@ -711,6 +711,12 @@ zdtun_conn_t* zdtun_lookup(zdtun_t *tun, const zdtun_5tuple_t *tuple, uint8_t cr
   zdtun_conn_t *conn = NULL;
 
   HASH_FIND(hh, tun->conn_table, tuple, sizeof(*tuple), conn);
+  if(conn && (conn->status >= CONN_STATUS_CLOSED)) {
+    // avoid returning connections to purge, for which the close_callback was already called and
+    // user data was probably already deallocated.
+    destroy_conn(tun, conn);
+    conn = NULL;
+  }
 
   if(!conn && create) {
     if(tun->stats.num_open_sockets >= MAX_NUM_SOCKETS) {
@@ -784,7 +790,7 @@ static int check_dns_purge(zdtun_t *tun, zdtun_conn_t *conn,
 
         /* DNS responses received, can now purge the conn */
         debug("DNS purge: %s", zdtun_5tuple2str(&conn->tuple, buf, sizeof(buf)));
-        close_conn(tun, conn, CONN_STATUS_CLOSED);
+        zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
 
         /* purged */
         return(0);
@@ -1012,7 +1018,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
   if(data->th_flags & TH_URG) {
     error("URG data not supported");
-    close_conn(tun, conn, CONN_STATUS_ERROR);
+    zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
     return -1;
   }
 
@@ -1133,13 +1139,13 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     error("Got data while SOCKS5 in progress (status: %d, %d bytes, TCP flags: %d)",
         conn->socks5_status, pkt->l7_len, data->th_flags);
 
-    close_conn(tun, conn, CONN_STATUS_SOCKS5_ERROR);
+    zdtun_conn_close(tun, conn, CONN_STATUS_SOCKS5_ERROR);
     return -1;
   }
 
   if(data->th_flags & TH_RST) {
     debug("Got TCP reset from client");
-    close_conn(tun, conn, CONN_STATUS_CLOSED);
+    zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
 
     return 0;
   } else if((data->th_flags & (TH_FIN | TH_ACK)) == (TH_FIN | TH_ACK)) {
@@ -1164,7 +1170,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
     if(conn->sock == INVALID_SOCKET)
       // Both the client and the server have closed, terminate the connection
-      close_conn(tun, conn, CONN_STATUS_CLOSED);
+      zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
 
     return rv;
   }
@@ -1235,7 +1241,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
         if(!partial) {
           error("malloc(partial_segment_t) failed");
-          close_conn(tun, conn, CONN_STATUS_ERROR);
+          zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
           return -1;
         }
 
@@ -1473,8 +1479,8 @@ zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, int pkt_len)
   if(zdtun_forward(tun, &pkt, conn) != 0) {
     debug("zdtun_forward failed");
 
-    /* Destroy the connection as soon an any error occurs */
-    zdtun_destroy_conn(tun, conn);
+    /* Close the connection as soon an any error occurs */
+    zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
     return NULL;
   }
 
@@ -1495,7 +1501,7 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
   if(icmp_len < sizeof(struct icmphdr)) {
     error("ICMP packet too small[%d]", icmp_len);
-    close_conn(tun, conn, CONN_STATUS_ERROR);
+    zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
     return -1;
   }
 
@@ -1503,7 +1509,7 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
   if((data->type != ICMP_ECHO) && (data->type != ICMP_ECHOREPLY)) {
     debug("Discarding unsupported ICMP[%d]", data->type);
-    close_conn(tun, conn, CONN_STATUS_ERROR);
+    zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
     return 0;
   }
 
@@ -1550,7 +1556,7 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
     if(conn->tcp.client_closed)
       // Both the client and the server have closed, terminate the connection
-      close_conn(tun, conn, CONN_STATUS_CLOSED);
+      zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
 
     return 0;
   }
@@ -1571,7 +1577,7 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
   if(conn->tcp.window_size < l4_len) {
     error("Invalid state: TCP windows_size < l4_len");
-    close_conn(tun, conn, CONN_STATUS_ERROR);
+    zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
     return -1;
   }
 
@@ -1657,7 +1663,7 @@ static int handle_tcp_connect_async(zdtun_t *tun, zdtun_conn_t *conn) {
   if(getsockopt(conn->sock, SOL_SOCKET, SO_ERROR, (char*)&optval, &optlen) == SOCKET_ERROR) {
     error("getsockopt failed: %d", socket_errno);
 
-    close_conn(tun, conn, CONN_STATUS_SOCKET_ERROR);
+    zdtun_conn_close(tun, conn, CONN_STATUS_SOCKET_ERROR);
     rv = -1;
   } else {
     if(optval == 0) {
@@ -1778,7 +1784,7 @@ void zdtun_purge_expired(zdtun_t *tun) {
 
     if((conn->status >= CONN_STATUS_CLOSED) || (now >= (timeout + conn->tstamp))) {
       debug("IDLE (type=%d)", conn->tuple.ipproto);
-      zdtun_destroy_conn(tun, conn);
+      destroy_conn(tun, conn);
     }
   }
 
@@ -1793,7 +1799,7 @@ void zdtun_purge_expired(zdtun_t *tun) {
       if(to_purge == 0)
         break;
 
-      zdtun_destroy_conn(tun, conn);
+      destroy_conn(tun, conn);
       to_purge--;
     }
   }

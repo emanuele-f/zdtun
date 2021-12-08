@@ -75,7 +75,7 @@ int handle_socks5_reply(zdtun_t *tun, zdtun_conn_t *conn, char *data, int len) {
     struct socks5_srv_choice *reply = (struct socks5_srv_choice*) data;
 
     if((len != 2) || (reply->ver != 5)) {
-      close_conn(tun, conn, CONN_STATUS_SOCKS5_ERROR);
+      zdtun_conn_close(tun, conn, CONN_STATUS_SOCKS5_ERROR);
       return -1;
     }
 
@@ -110,7 +110,7 @@ int handle_socks5_reply(zdtun_t *tun, zdtun_conn_t *conn, char *data, int len) {
     struct socks5_connect_reply *reply = (struct socks5_connect_reply*) data;
 
     if((len < 4) || (reply->ver != 5)) {
-      close_conn(tun, conn, CONN_STATUS_SOCKS5_ERROR);
+      zdtun_conn_close(tun, conn, CONN_STATUS_SOCKS5_ERROR);
       return -1;
     }
 
@@ -135,7 +135,7 @@ int handle_socks5_reply(zdtun_t *tun, zdtun_conn_t *conn, char *data, int len) {
           rv = -1;
       }
 
-      close_conn(tun, conn, status);
+      zdtun_conn_close(tun, conn, status);
       return rv;
     } else {
       uint8_t addrtype = reply->bndaddr[0];
@@ -149,7 +149,7 @@ int handle_socks5_reply(zdtun_t *tun, zdtun_conn_t *conn, char *data, int len) {
       else {
         error("invalid SOCKS5 addr type: %d", addrtype);
 
-        close_conn(tun, conn, CONN_STATUS_SOCKS5_ERROR);
+        zdtun_conn_close(tun, conn, CONN_STATUS_SOCKS5_ERROR);
         return -1;
       }
 
@@ -178,7 +178,7 @@ int handle_socks5_reply(zdtun_t *tun, zdtun_conn_t *conn, char *data, int len) {
   } else {
     error("invalid SOCKS5 status: %d", conn->socks5_status);
 
-    close_conn(tun, conn, CONN_STATUS_SOCKS5_ERROR);
+    zdtun_conn_close(tun, conn, CONN_STATUS_SOCKS5_ERROR);
     return -1;
   }
 }

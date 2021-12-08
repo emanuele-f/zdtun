@@ -331,8 +331,6 @@ typedef struct zdtun_callbacks {
  */
 zdtun_t* zdtun_init(struct zdtun_callbacks *callbacks, void *udata);
 
-void zdtun_destroy_conn(zdtun_t *tun, zdtun_conn_t *conn);
-
 /*
  * @brief Retrieves user data passed in zdtun_init from a zdtun connection.
  *
@@ -504,6 +502,7 @@ void* zdtun_conn_get_userdata(const zdtun_conn_t *conn);
 void zdtun_conn_set_userdata(zdtun_conn_t *conn, void *userdata);
 void zdtun_conn_proxy(zdtun_conn_t *conn);
 void zdtun_conn_dnat(zdtun_conn_t *conn);
+void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t status);
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
 time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);
 zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn);

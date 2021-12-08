@@ -120,8 +120,8 @@ static zdtun_conn_t* data_out(zdtun_t *tun, const char *pkt_buf, int pkt_len) {
   if(zdtun_forward(tun, &pkt, conn) != 0) {
     error("zdtun_forward failed");
 
-    /* Destroy the connection as soon an any error occurs */
-    zdtun_destroy_conn(tun, conn);
+    /* Close the connection as soon an any error occurs */
+    zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
     return NULL;
   }
 
