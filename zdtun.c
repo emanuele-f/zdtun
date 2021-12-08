@@ -436,7 +436,7 @@ static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
     if(tun->callbacks.account_packet)
         tun->callbacks.account_packet(tun, &tun->last_pkt, 0 /* from zdtun */, conn);
   } else {
-    error("send_client failed [%d]", rv);
+    debug("send_client failed [%d]", rv);
 
     // important: set this to prevent close_conn to call send_to_client again in a loop
     conn->tcp.fin_ack_sent = 1;
