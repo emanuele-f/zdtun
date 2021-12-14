@@ -537,7 +537,8 @@ uint16_t zdtun_l3_checksum(zdtun_t *tun, zdtun_conn_t *conn, char *ipbuf, char *
     rv = calc_checksum(rv, (uint8_t*)&pseudo, sizeof(pseudo));
   } else {
     struct ipv6_hdr *ip_header = (struct ipv6_hdr*)ipbuf;
-    struct ip6_hdr_pseudo pseudo = {0};
+    struct ip6_hdr_pseudo pseudo;
+    memset(&pseudo, 0, sizeof(pseudo));
 
     pseudo.ip6ph_src = ip_header->saddr;
     pseudo.ip6ph_dst = ip_header->daddr;
