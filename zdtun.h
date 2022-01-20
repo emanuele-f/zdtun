@@ -419,7 +419,7 @@ int zdtun_parse_pkt(zdtun_t *tun, const char *pkt_buf, uint16_t pkt_len, zdtun_p
 void zdtun_set_mtu(zdtun_t *tun, int mtu);
 
 /*
- * Parses an IP address string into a zdtun_ip_t.
+ * Parse an IP address string into a zdtun_ip_t.
  *
  * @param ip_str the IP address to parse
  * @param parsed the zdtun_ip_t to fill with the parsed data
@@ -427,6 +427,18 @@ void zdtun_set_mtu(zdtun_t *tun, int mtu);
  * @return the IP version (4 or 6) on success, -1 otherwise.
  */
 int zdtun_parse_ip(const char *ip_str, zdtun_ip_t *parsed);
+
+/*
+ * Compare the given IP addresses.
+ *
+ * @param the IP version (4 or 6).
+ * @param ip_a the first IP address
+ * @param ip_b the second IP address
+ *
+ * @return 0 if the IP addresses are equal, -1 if ip_a is less then
+ *         ip_b, 1 otherwise.
+ */
+int zdtun_cmp_ip(int ipver, zdtun_ip_t *ip_a, zdtun_ip_t *ip_b);
 
 /*
  * Forward a client packet through the pivot.

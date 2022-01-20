@@ -992,6 +992,15 @@ int zdtun_parse_ip(const char *ip_str, zdtun_ip_t *parsed) {
 
 /* ******************************************************* */
 
+int zdtun_cmp_ip(int ipver, zdtun_ip_t *ip_a, zdtun_ip_t *ip_b) {
+  if(ipver == 4)
+    return(memcmp(&ip_a->ip4, &ip_b->ip4, 4));
+  else
+    return(memcmp(&ip_a->ip6, &ip_b->ip6, 16));
+}
+
+/* ******************************************************* */
+
 static void fill_conn_sockaddr(zdtun_t *tun, zdtun_conn_t *conn,
         struct sockaddr_in6 *addr6, socklen_t *addrlen) {
   uint8_t ipver = sock_ipver(tun, conn);
