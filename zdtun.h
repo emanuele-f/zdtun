@@ -419,6 +419,16 @@ int zdtun_parse_pkt(zdtun_t *tun, const char *pkt_buf, uint16_t pkt_len, zdtun_p
 void zdtun_set_mtu(zdtun_t *tun, int mtu);
 
 /*
+ * Parses an IP address string into a zdtun_ip_t.
+ *
+ * @param ip_str the IP address to parse
+ * @param parsed the zdtun_ip_t to fill with the parsed data
+ *
+ * @return the IP version (4 or 6) on success, -1 otherwise.
+ */
+int zdtun_parse_ip(const char *ip_str, zdtun_ip_t *parsed);
+
+/*
  * Forward a client packet through the pivot.
  *
  * @param tun a zdtun instance.

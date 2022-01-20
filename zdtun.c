@@ -976,6 +976,22 @@ void zdtun_set_mtu(zdtun_t *tun, int mtu) {
 
 /* ******************************************************* */
 
+int zdtun_parse_ip(const char *ip_str, zdtun_ip_t *parsed) {
+  int rv = -1;
+
+  if(strchr(ip_str, '.')) {
+    if(inet_pton(AF_INET, ip_str, &parsed->ip4) > 0)
+      rv = 4;
+  } else{
+    if(inet_pton(AF_INET6, ip_str, &parsed->ip6) > 0)
+      rv = 6;
+  }
+
+  return rv;
+}
+
+/* ******************************************************* */
+
 static void fill_conn_sockaddr(zdtun_t *tun, zdtun_conn_t *conn,
         struct sockaddr_in6 *addr6, socklen_t *addrlen) {
   uint8_t ipver = sock_ipver(tun, conn);
