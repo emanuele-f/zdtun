@@ -37,7 +37,7 @@ if(WIN32)
 
   # assume LITTLE_ENDIAN on Windows
 else()
-  set(CMAKE_C_FLAGS "-Wall -Wno-unused-variable -Wno-unused-function -g")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wno-unused-variable -Wno-unused-function -g -fPIC")
 
   include (TestBigEndian)
   TEST_BIG_ENDIAN(IS_BIG_ENDIAN)
