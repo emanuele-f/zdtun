@@ -373,7 +373,7 @@ int zdtun_iter_connections(zdtun_t *tun, zdtun_conn_iterator_t iterator, void *u
  * @param rd_fds pointer to readable fds as returned by select.
  * @param wr_fds pointer to writable fds as returned by select.
  *
- * @return number of handled file descriptors.
+ * @return 0 on success
  */
 int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds);
 

@@ -64,6 +64,21 @@ typedef struct {
   char data[];
 } partial_segment_t;
 
+// used to resolve port numbers for IP fragments
+typedef struct {
+  uint16_t sport;
+  uint16_t dport;
+} ip_frag_ports_t;
+
+// enables UDP sockets reuse for STUN
+typedef struct {
+  uint32_t key;
+  uint8_t num_uses;
+  socket_t sock;
+  zdtun_conn_t *last_mapped;
+  UT_hash_handle hh;
+} udp_mapping_t;
+
 typedef enum {
   PROXY_NONE = 0,
   PROXY_DNAT,
@@ -76,13 +91,6 @@ typedef struct {
   uint8_t ipver;
 } proxy_t;
 
-/* ******************************************************* */
-
-// used to resolve port numbers for IP fragments
-typedef struct {
-  uint16_t sport;
-  uint16_t dport;
-} ip_frag_ports_t;
 
 /* ******************************************************* */
 
@@ -96,19 +104,24 @@ typedef struct zdtun_conn {
   socks5_status_t socks5_status;
   uint8_t socks5_skip;
 
-  struct {
-    partial_segment_t *partial_send;
-    u_int32_t client_seq;    // next client sequence number
-    u_int32_t zdtun_seq;     // next proxy sequence number
-    u_int32_t window_size;   // scaled client window size
-    u_int16_t mss;           // client MSS
-    u_int8_t window_scale;   // client/zdtun TCP window scale
-
+  union {
     struct {
-      uint8_t fin_ack_sent:1;
-      uint8_t client_closed:1;
-    };
-  } tcp;
+      partial_segment_t *partial_send;
+      u_int32_t client_seq;    // next client sequence number
+      u_int32_t zdtun_seq;     // next proxy sequence number
+      u_int32_t window_size;   // scaled client window size
+      u_int16_t mss;           // client MSS
+      u_int8_t window_scale;   // client/zdtun TCP window scale
+
+      struct {
+        uint8_t fin_ack_sent:1;
+        uint8_t client_closed:1;
+      };
+    } tcp;
+    struct {
+        uint8_t can_rx;        // to handle rx in tun->udp_mappings
+    } udp;
+  };
 
   struct {
     u_int8_t pending_queries;
@@ -136,6 +149,7 @@ typedef struct zdtun_t {
   proxy_t dnat;
 
   zdtun_conn_t *conn_table;
+  udp_mapping_t *udp_mappings;
 } zdtun_t;
 
 /* ******************************************************* */
@@ -190,6 +204,13 @@ static uint8_t sock_ipver(zdtun_t *tun, zdtun_conn_t *conn) {
     return tun->socks5.ipver;
   else
     return conn->tuple.ipver;
+}
+
+/* ******************************************************* */
+
+static inline uint32_t udp_mapping_key(const zdtun_5tuple_t *tuple) {
+  // ignoring the src IP, assume only 1 client
+  return (uint32_t)tuple->ipver << 16 | tuple->src_port;
 }
 
 /* ******************************************************* */
@@ -417,6 +438,8 @@ void zdtun_finalize(zdtun_t *tun) {
     destroy_conn(tun, conn);
   }
 
+  // tun->udp_mappings is cleaned up during destroy_conn
+
   free(tun);
 }
 
@@ -593,10 +616,35 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
 // will be (later) destroyed by zdtun_purge_expired.
 // May be called multiple times.
 void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t status) {
+  int do_close = 1;
+
   if(conn->status >= CONN_STATUS_CLOSED)
     return;
 
-  close_socket(tun, conn->sock);
+  if(conn->tuple.ipproto == IPPROTO_UDP) {
+    udp_mapping_t *mapping;
+    uint32_t key = udp_mapping_key(&conn->tuple);
+
+    HASH_FIND(hh, tun->udp_mappings, &key, sizeof(key), mapping);
+
+    // the socket may not correspond (e.g. if the num_uses was 255)
+    if(mapping && (mapping->sock == conn->sock)) {
+      if(mapping->last_mapped == conn)
+        mapping->last_mapped = NULL;
+
+      if(--mapping->num_uses > 0)
+        do_close = 0;
+      else {
+        // zero uses, can free and close (do_close=1)
+        HASH_DELETE(hh, tun->udp_mappings, mapping);
+        free(mapping);
+      }
+    }
+  }
+
+  if(do_close)
+    close_socket(tun, conn->sock);
+
   conn->sock = INVALID_SOCKET;
 
   if((conn->tuple.ipproto == IPPROTO_TCP)
@@ -1307,52 +1355,82 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
   int family = (ipver == 4) ? PF_INET : PF_INET6;
 
   if(conn->status == CONN_STATUS_NEW) {
-    debug("Allocating new UDP socket for port %d", ntohs(data->uh_sport));
+    // If the client opens a new UDP connection with the same source port,
+    // then reuse the existing UDP socket (and local port). This makes
+    // NAT traversal protocols like STUN work.
+    socket_t udp_sock = INVALID_SOCKET;
+    udp_mapping_t *mapping;
+    uint32_t key = udp_mapping_key(&conn->tuple);
 
-    socket_t udp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_UDP);
+    HASH_FIND(hh, tun->udp_mappings, &key, sizeof(key), mapping);
+    if((mapping == NULL) || (mapping->num_uses == 255)) {
+      debug("Allocating new UDP socket for port %d", ntohs(data->uh_sport));
 
-    if(udp_sock == INVALID_SOCKET) {
-      error("Cannot create UDP socket[%d]", socket_errno);
-      return -1;
-    }
+      udp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_UDP);
+      if(udp_sock == INVALID_SOCKET) {
+        error("Cannot create UDP socket[%d]", socket_errno);
+        return -1;
+      }
 
-    // Check for broadcasts/multicasts
-    if(ipver == 4) {
-      if(conn->tuple.dst_ip.ip4 == INADDR_BROADCAST) {
-        int on = 1;
+      // Check for broadcasts/multicasts
+      if(ipver == 4) {
+        if(conn->tuple.dst_ip.ip4 == INADDR_BROADCAST) {
+          int on = 1;
 
-        debug("UDP4 broadcast detected");
+          debug("UDP4 broadcast detected");
 
-        if(setsockopt(udp_sock, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on)))
-          error("UDP setsockopt SO_BROADCAST failed[%d]: %s", errno, strerror(errno));
+          if(setsockopt(udp_sock, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on)))
+            error("UDP setsockopt SO_BROADCAST failed[%d]: %s", errno, strerror(errno));
+        }
+      } else {
+        // Adapted from netguard/udp.c
+        if(conn->tuple.dst_ip.ip6.s6_addr[0] == 0xFF) {
+          debug("UDP6 broadcast detected");
+
+          int loop = 1; // true
+          if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &loop, sizeof(loop)))
+            error("UDP setsockopt IPV6_MULTICAST_LOOP failed[%d]: %s",
+                    errno, strerror(errno));
+
+          int ttl = -1; // route default
+          if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &ttl, sizeof(ttl)))
+            error("UDP setsockopt IPV6_MULTICAST_HOPS failed[%d]: %s",
+                    errno, strerror(errno));
+
+          struct ipv6_mreq mreq6;
+          memcpy(&mreq6.ipv6mr_multiaddr, &conn->tuple.dst_ip.ip6, 16);
+          mreq6.ipv6mr_interface = INADDR_ANY;
+
+          if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &mreq6, sizeof(mreq6)))
+            error("UDP setsockopt IPV6_ADD_MEMBERSHIP failed[%d]: %s",
+                    errno, strerror(errno));
+        }
+      }
+
+      if(mapping == NULL) {
+        safe_alloc(mapping, udp_mapping_t);
+        mapping->key = key;
+        mapping->num_uses = 1;
+        mapping->sock = udp_sock;
+        mapping->last_mapped = conn;
+
+        HASH_ADD(hh, tun->udp_mappings, key, sizeof(key), mapping);
       }
     } else {
-      // Adapted from netguard/udp.c
-      if(conn->tuple.dst_ip.ip6.s6_addr[0] == 0xFF) {
-        debug("UDP6 broadcast detected");
+      debug("Reusing existing UDP socket for port %d", ntohs(data->uh_sport));
 
-        int loop = 1; // true
-        if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &loop, sizeof(loop)))
-          error("UDP setsockopt IPV6_MULTICAST_LOOP failed[%d]: %s",
-                  errno, strerror(errno));
+      udp_sock = mapping->sock;
+      mapping->num_uses++;
 
-        int ttl = -1; // route default
-        if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &ttl, sizeof(ttl)))
-          error("UDP setsockopt IPV6_MULTICAST_HOPS failed[%d]: %s",
-                  errno, strerror(errno));
-
-        struct ipv6_mreq mreq6;
-        memcpy(&mreq6.ipv6mr_multiaddr, &conn->tuple.dst_ip.ip6, 16);
-        mreq6.ipv6mr_interface = INADDR_ANY;
-
-        if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &mreq6, sizeof(mreq6)))
-          error("UDP setsockopt IPV6_ADD_MEMBERSHIP failed[%d]: %s",
-                  errno, strerror(errno));
-      }
+      // Only 1 connection sharing the socket can rx, the most recent one
+      if(mapping->last_mapped)
+        mapping->last_mapped->udp.can_rx = 0;
+      mapping->last_mapped = conn;
     }
 
     conn->sock = udp_sock;
     conn->status = CONN_STATUS_CONNECTED;
+    conn->udp.can_rx = 1;
   }
 
   if(tun->callbacks.account_packet)
@@ -1739,12 +1817,11 @@ static int handle_partial_send(zdtun_t *tun, zdtun_conn_t *conn) {
 /* ******************************************************* */
 
 int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
-  int num_hits = 0;
+  int rv = 0;
   zdtun_conn_t *conn, *tmp;
 
   HASH_ITER(hh, tun->conn_table, conn, tmp) {
     uint8_t ipproto = conn->tuple.ipproto;
-    int rv = 0;
 
     if(conn->sock == INVALID_SOCKET)
       continue;
@@ -1752,14 +1829,13 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
     if(FD_ISSET(conn->sock, rd_fds)) {
       if(ipproto == IPPROTO_TCP)
         rv = handle_tcp_reply(tun, conn);
-      else if(ipproto == IPPROTO_UDP)
-        rv = handle_udp_reply(tun, conn);
-      else if(ipproto == IPPROTO_ICMP)
+      else if(ipproto == IPPROTO_UDP) {
+        if(conn->udp.can_rx)
+          rv = handle_udp_reply(tun, conn);
+      } else if(ipproto == IPPROTO_ICMP)
         rv = handle_icmp_reply(tun, conn);
       else
         error("Unhandled socket.rd proto: %d", ipproto);
-
-      num_hits++;
     } else if(FD_ISSET(conn->sock, wr_fds)) {
       if(ipproto == IPPROTO_TCP) {
         if(conn->tcp.partial_send)
@@ -1768,15 +1844,13 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
           rv = handle_tcp_connect_async(tun, conn);
       } else
         error("Unhandled socket.wr proto: %d", ipproto);
-
-      num_hits++;
     }
 
     if(rv != 0)
       break;
   }
 
-  return num_hits;
+  return rv;
 }
 
 /* ******************************************************* */
