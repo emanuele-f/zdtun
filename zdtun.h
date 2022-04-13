@@ -514,6 +514,11 @@ const char* zdtun_conn_status2str(zdtun_conn_status_t status);
 void zdtun_set_socks5_proxy(zdtun_t *tun, const zdtun_ip_t *proxy_ip, uint16_t proxy_port, uint8_t ipver);
 
 /*
+ * Enable SOCKS5 username/password authentication
+ */
+void zdtun_set_socks5_userpass(zdtun_t *tun, const char *username, const char *password);
+
+/*
  * Set DNAT info. Individual connections to DNAT must be marked by
  * calling zdtun_conn_dnat.
  */

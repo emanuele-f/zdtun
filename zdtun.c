@@ -148,6 +148,9 @@ typedef struct zdtun_t {
   proxy_t socks5;
   proxy_t dnat;
 
+  char *socks5_user;
+  char *socks5_pass;
+
   zdtun_conn_t *conn_table;
   udp_mapping_t *udp_mappings;
 } zdtun_t;
@@ -355,6 +358,16 @@ void zdtun_set_socks5_proxy(zdtun_t *tun, const zdtun_ip_t *proxy_ip,
 
 /* ******************************************************* */
 
+void zdtun_set_socks5_userpass(zdtun_t *tun, const char *username, const char *password) {
+  free(tun->socks5_user);
+  free(tun->socks5_pass);
+
+  tun->socks5_user = strdup(username);
+  tun->socks5_pass = strdup(password);
+}
+
+/* ******************************************************* */
+
 void zdtun_set_dnat_info(zdtun_t *tun, const zdtun_ip_t *proxy_ip,
         uint16_t proxy_port, uint8_t ipver) {
   tun->dnat.ip = *proxy_ip;
@@ -440,6 +453,8 @@ void zdtun_finalize(zdtun_t *tun) {
 
   // tun->udp_mappings is cleaned up during destroy_conn
 
+  free(tun->socks5_user);
+  free(tun->socks5_pass);
   free(tun);
 }
 

@@ -25,10 +25,18 @@
 
 // See https://en.wikipedia.org/wiki/SOCKS#SOCKS5
 
+#define SOCKS5_AUTH_USERNAME_PASSWORD 0x02
+
 PACK_ON
 struct socks5_srv_choice {
   uint8_t ver;
   uint8_t cauth;
+} PACK_OFF;
+
+PACK_ON
+struct socks5_auth_response {
+  uint8_t ver;
+  uint8_t status;
 } PACK_OFF;
 
 PACK_ON
@@ -55,8 +63,8 @@ typedef enum {
 /* ******************************************************* */
 
 int socks5_connect(zdtun_t *tun, zdtun_conn_t *conn) {
-  // ver, nauth, no_auth
-  uint8_t hello[] = {5, 1, 0};
+  // ver, nauth, no_auth|username_password
+  uint8_t hello[] = {5, 1, tun->socks5_user ? SOCKS5_AUTH_USERNAME_PASSWORD : 0};
 
   if(send(conn->sock, hello, 3, 0) < 0)
     return close_with_socket_error(tun, conn, "SOCKS5_HELLO send");
@@ -65,6 +73,68 @@ int socks5_connect(zdtun_t *tun, zdtun_conn_t *conn) {
 
   conn->socks5_status = SOCKS5_HELLO;
 
+  return 0;
+}
+
+/* ******************************************************* */
+
+// Client auth request - https://datatracker.ietf.org/doc/html/rfc1929
+static int socks5_auth(zdtun_t *tun, zdtun_conn_t *conn) {
+  int user_len = strlen(tun->socks5_user);
+  int pass_len = strlen(tun->socks5_pass);
+  int i = 0;
+
+  uint8_t auth_req[3 + user_len + pass_len];
+
+  auth_req[i++] = 1;
+
+  auth_req[i++] = user_len;
+  memcpy(auth_req + i, tun->socks5_user, user_len);
+  i += user_len;
+
+  auth_req[i++] = pass_len;
+  memcpy(auth_req + i, tun->socks5_pass, pass_len);
+  i += pass_len;
+
+  if(send(conn->sock, auth_req, i, 0) < 0)
+    return close_with_socket_error(tun, conn, "SOCKS5_AUTH send");
+
+  //debug("SOCKS5_AUTH sent");
+
+  conn->socks5_status = SOCKS5_AUTH;
+
+  return 0;
+}
+
+/* ******************************************************* */
+
+static int socks5_req(zdtun_t *tun, zdtun_conn_t *conn) {
+  uint8_t req[32], *p;
+  int addrsize;
+
+  p = req;
+  (*p++) = 5; // ver
+  (*p++) = 1; // cmd: TCP/IP connection
+  (*p++) = 0; // reserved
+
+  if(conn->tuple.ipver == 4) {
+    (*p++) = 1; // IPv4 address
+    memcpy(p, &conn->tuple.dst_ip.ip4, 4);
+    addrsize = 4;
+  } else {
+    (*p++) = 4; // IPv6 address
+    memcpy(p, &conn->tuple.dst_ip.ip6, 16);
+    addrsize = 16;
+  }
+
+  memcpy(p+addrsize, &conn->tuple.dst_port, 2);
+
+  if(send(conn->sock, req, 6+addrsize, 0) < 0)
+    return close_with_socket_error(tun, conn, "SOCKS5_CONNECTING send");
+
+  //debug("SOCKS5_CONNECTING sent");
+
+  conn->socks5_status = SOCKS5_CONNECTING;
   return 0;
 }
 
@@ -79,33 +149,26 @@ int handle_socks5_reply(zdtun_t *tun, zdtun_conn_t *conn, char *data, int len) {
       return -1;
     }
 
-    uint8_t req[32], *p;
-    int addrsize;
+    if(reply->cauth != 0) {
+      if((reply->cauth == SOCKS5_AUTH_USERNAME_PASSWORD) && tun->socks5_user)
+        return socks5_auth(tun, conn);
 
-    p = req;
-    (*p++) = 5; // ver
-    (*p++) = 1; // cmd: TCP/IP connection
-    (*p++) = 0; // reserved
-
-    if(conn->tuple.ipver == 4) {
-      (*p++) = 1; // IPv4 address
-      memcpy(p, &conn->tuple.dst_ip.ip4, 4);
-      addrsize = 4;
-    } else {
-      (*p++) = 4; // IPv6 address
-      memcpy(p, &conn->tuple.dst_ip.ip6, 16);
-      addrsize = 16;
+      error("SOCKS5 bad auth: %d", reply->cauth);
+      zdtun_conn_close(tun, conn, CONN_STATUS_SOCKS5_ERROR);
+      return -1;
     }
 
-    memcpy(p+addrsize, &conn->tuple.dst_port, 2);
+    return socks5_req(tun, conn);
+  } else if(conn->socks5_status == SOCKS5_AUTH) {
+    struct socks5_auth_response *reply = (struct socks5_auth_response*) data;
 
-    if(send(conn->sock, req, 6+addrsize, 0) < 0)
-      return close_with_socket_error(tun, conn, "SOCKS5_CONNECTING send");
+    if((len < sizeof(*reply)) || (reply->ver != 1) || (reply->status != 0)) {
+      error("SOCKS5 bad auth reply[v%d]: %d", reply->ver, reply->status);
+      zdtun_conn_close(tun, conn, CONN_STATUS_SOCKS5_ERROR);
+      return -1;
+    }
 
-    //debug("SOCKS5_CONNECTING sent");
-
-    conn->socks5_status = SOCKS5_CONNECTING;
-    return 0;
+    return socks5_req(tun, conn);
   } else if(conn->socks5_status == SOCKS5_CONNECTING) {
     struct socks5_connect_reply *reply = (struct socks5_connect_reply*) data;
 
