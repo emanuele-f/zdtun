@@ -876,12 +876,12 @@ static int is_upper_layer(int proto) {
 /* ******************************************************* */
 
 int zdtun_parse_pkt(zdtun_t *tun, const char *_pkt_buf, uint16_t pkt_len, zdtun_pkt_t *pkt) {
-  if (pkt_len < IPV4_HEADER_LEN) {
+  memset(pkt, 0, sizeof(zdtun_pkt_t));
+
+  if(pkt_len < IPV4_HEADER_LEN) {
     debug("Ignoring non IP packet (len: %d)", pkt_len);
     return -1;
   }
-
-  memset(pkt, 0, sizeof(zdtun_pkt_t));
 
   char *pkt_buf = (char *)_pkt_buf; /* needed to set the zdtun_pkt_t pointers */
   uint8_t ipver = (*pkt_buf) >> 4;
