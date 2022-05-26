@@ -2,7 +2,7 @@
  * Zero Dep Tunnel: VPN library without dependencies
  * ----------------------------------------------------------------------------
  *
- * Copyright (C) 2018-21 - Emanuele Faranda
+ * Copyright (C) 2018-22 - Emanuele Faranda
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -58,11 +58,13 @@ static void destroy_conn(zdtun_t *tun, zdtun_conn_t *conn);
 
 /* ******************************************************* */
 
-typedef struct {
+typedef struct tcp_data {
+  struct tcp_data* next;
   uint16_t len;
-  uint8_t push;
+  uint16_t sofar;
+  uint8_t flags;
   char data[];
-} partial_segment_t;
+} tcp_data_t;
 
 // used to resolve port numbers for IP fragments
 typedef struct {
@@ -106,7 +108,8 @@ typedef struct zdtun_conn {
 
   union {
     struct {
-      partial_segment_t *partial_send;
+      tcp_data_t *tx_queue;    // contains TCP segment data to send via the socket
+      u_int32_t tx_queue_size; // queued bytes in partial_send
       u_int32_t client_seq;    // next client sequence number
       u_int32_t zdtun_seq;     // next proxy sequence number
       u_int32_t window_size;   // scaled client window size
@@ -501,18 +504,13 @@ static int get_available_sndbuf(zdtun_conn_t *conn) {
   int queued = 0;
   socklen_t len = sizeof(bufsize);
 
-  // Bottleneck was reached, send a 0 window.
-  if(conn->tcp.partial_send)
-    return 0;
-
   // Get the available bytes in the send buffer
   getsockopt(conn->sock, SOL_SOCKET, SO_SNDBUF, &bufsize, &len);
-
   if(bufsize == 0)
-    return DEFAULT_TCP_WINDOW;
+    bufsize = DEFAULT_TCP_WINDOW;
 
   ioctl(conn->sock, SIOCOUTQ, &queued);
-  int sockbuf_avail = bufsize - queued;
+  int sockbuf_avail = bufsize - queued - conn->tcp.tx_queue_size;
 
   return max(sockbuf_avail, 0);
 }
@@ -669,9 +667,17 @@ void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t stat
     send_to_client(tun, conn, TCP_HEADER_LEN);
   }
 
-  if((conn->tuple.ipproto == IPPROTO_TCP) && (conn->tcp.partial_send)) {
-    free(conn->tcp.partial_send);
-    conn->tcp.partial_send = NULL;
+  if(conn->tuple.ipproto == IPPROTO_TCP) {
+    tcp_data_t *cur = conn->tcp.tx_queue;
+
+    // free tx_queue
+    while(cur) {
+      tcp_data_t *next = cur->next;
+      free(cur);
+      cur = next;
+    }
+
+    conn->tcp.tx_queue = NULL;
   }
 
   conn->status = (status >= CONN_STATUS_CLOSED) ? status : CONN_STATUS_CLOSED;
@@ -1094,6 +1100,40 @@ static void fill_conn_sockaddr(zdtun_t *tun, zdtun_conn_t *conn,
 
 /* ******************************************************* */
 
+static int enqueue_tcp_data(zdtun_t *tun, zdtun_conn_t *conn, const char *buf, int bufsize, uint8_t flags) {
+  tcp_data_t *item;
+
+  item = calloc(1, sizeof(tcp_data_t) + bufsize);
+  if(!item) {
+    error("calloc(tcp_data_t) failed");
+    zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
+    return -1;
+  }
+
+  item->flags = flags;
+  item->len = bufsize;
+  memcpy(item->data, buf, bufsize);
+
+  // append
+  if(conn->tcp.tx_queue) {
+    tcp_data_t *cur = conn->tcp.tx_queue;
+    while(cur->next)
+      cur = cur->next;
+    cur->next = item;
+  } else
+    conn->tcp.tx_queue = item;
+
+  conn->tcp.tx_queue_size += bufsize;
+
+  // will be handled in handle_queued_tcp_data
+  // increment of client_seq and sending of ACK is also deferred
+  FD_SET(conn->sock, &tun->write_fds);
+
+  return 0;
+}
+
+/* ******************************************************* */
+
 // returns 0 on success
 // returns <0 on error
 // no_ack: can be used to avoid sending the ACK to the client and keep
@@ -1219,7 +1259,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   uint8_t is_keep_alive = ((data->th_flags & TH_ACK) &&
     ((seq + 1) == conn->tcp.client_seq));
 
-  if(!is_keep_alive && (seq != conn->tcp.client_seq)) {
+  if(!is_keep_alive && (seq != (conn->tcp.client_seq + conn->tcp.tx_queue_size))) {
     debug("ignoring out of sequence data: expected %d, got %d", conn->tcp.client_seq, seq);
     return 0;
   }
@@ -1301,60 +1341,20 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     }
   }
 
-  // payload data (avoid sending ACK to an ACK)
+  // check for payload data (avoid sending ACK to an ACK)
   if(pkt->l7_len > 0) {
-    if(conn->sock != INVALID_SOCKET) {
-      if(conn->tcp.partial_send) {
-        // Another partial send is in progress. New packets can be simply
-        // discarded as they will be retransmitted by the client. This
-        // simulates network congestion and thus throttles the client.
-        log_partial_send("Discarding %d packet SEQ %u", pkt->l7_len, seq);
-        return 0;
-      }
-
-      // MSG_MORE buffers packets until the TH_PUSH is set
-      // Use MSG_DONTWAIT to avoid blocking on large uploads
-      int flags = ((data->th_flags & TH_PUSH) ? 0 : MSG_MORE) | MSG_DONTWAIT;
-      int rv = send(conn->sock, pkt->l7, pkt->l7_len, flags);
-
-      if((rv < 0) && (errno != EWOULDBLOCK) && (errno != EAGAIN))
-        return close_with_socket_error(tun, conn, "TCP send");
-      else if(rv != pkt->l7_len) {
-        partial_segment_t *partial;
-        int sent = max(0, rv);
-        int remaining = pkt->l7_len - sent;
-
-        log_partial_send("TCP partial send: sent %d, remaining %d", sent, remaining);
-
-        partial = malloc(sizeof(partial_segment_t) + remaining);
-
-        if(!partial) {
-          error("malloc(partial_segment_t) failed");
-          zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
-          return -1;
-        }
-
-        partial->push = (data->th_flags & TH_PUSH);
-        partial->len = remaining;
-        memcpy(partial->data, pkt->l7 + sent, remaining);
-        conn->tcp.partial_send = partial;
-
-        // will be handled in handle_partial_send
-        FD_SET(conn->sock, &tun->write_fds);
-
-        // will send the ACK with the 0 window below
-      }
-    } else {
+    if(conn->sock == INVALID_SOCKET) {
       // The server may have closed the connection while the client is still
       // sending data. We should still ACK this data
       debug("Write after server socket closed");
-    }
 
-    // send the ACK
-    conn->tcp.client_seq += pkt->l7_len;
-    build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
-
-    return send_to_client(tun, conn, TCP_HEADER_LEN);
+      // send the ACK
+      conn->tcp.client_seq += pkt->l7_len;
+      build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
+      return send_to_client(tun, conn, TCP_HEADER_LEN);
+    } else
+      // data send is deferred to handle_queued_tcp_data, when socket will be ready for TX
+      return enqueue_tcp_data(tun, conn, pkt->l7, pkt->l7_len, data->th_flags);
   }
 
   return 0;
@@ -1786,30 +1786,49 @@ static int handle_tcp_connect_async(zdtun_t *tun, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
-static int handle_partial_send(zdtun_t *tun, zdtun_conn_t *conn) {
-  partial_segment_t *partial = conn->tcp.partial_send;
+static int handle_queued_tcp_data(zdtun_t *tun, zdtun_conn_t *conn) {
+  int sent = 0;
 
-  int flags = ((partial->push) ? 0 : MSG_MORE) | MSG_DONTWAIT;
-  int rv = send(conn->sock, partial->data, partial->len, flags);
+  while(conn->tcp.tx_queue) {
+    tcp_data_t *item = conn->tcp.tx_queue;
 
-  // No need to check EWOULDBLOCK|EAGAIN, as the socket is writable
-  if(rv < 0)
-    return close_with_socket_error(tun, conn, "TCP send2");
-  else if(rv != partial->len) {
-    int remaining = partial->len - rv;
+    // MSG_MORE buffers packets until the TH_PUSH is set
+    // Use MSG_DONTWAIT to avoid blocking on large uploads
+    int flags = ((item->flags & TH_PUSH) ? 0 : MSG_MORE) | MSG_DONTWAIT;
+    int to_send = item->len - item->sofar;
+    int rv = send(conn->sock, item->data + item->sofar, to_send, flags);
 
-    log_partial_send("TCP partial send: sent %d, still reamining %d", rv, remaining);
+    if(rv < 0) {
+      if((errno != EWOULDBLOCK) && (errno != EAGAIN))
+        return close_with_socket_error(tun, conn, "TCP send");
 
-    memmove(partial->data, partial->data + rv, remaining);
-    partial->len -= rv;
-  } else {
-    // NOTE, client ACK was already sent
-    log_partial_send("TCP partial send completed: %d B", partial->len);
+      debug("EAGAIN hit");
+      break;
+    } else if(rv != to_send) {
+      log_partial_send("TCP partial send: sent %d, still remaining %d", rv, to_send - rv);
 
-    free(partial);
-    conn->tcp.partial_send = NULL;
+      item->sofar += rv;
+      sent += rv;
+      break;
+    } else {
+      sent += to_send;
+      conn->tcp.tx_queue = item->next;
+      free(item);
+    }
+  }
 
+  if(!conn->tcp.tx_queue)
+    // no more data to send
     FD_CLR(conn->sock, &tun->write_fds);
+
+  if(sent > 0) {
+    // ACK the sent packets
+    conn->tcp.client_seq += sent;
+    conn->tcp.tx_queue_size -= sent;
+    build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
+
+    if(send_to_client(tun, conn, TCP_HEADER_LEN) < 0)
+      return -1;
   }
 
   return 0;
@@ -1839,8 +1858,8 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
         error("Unhandled socket.rd proto: %d", ipproto);
     } else if(FD_ISSET(conn->sock, wr_fds)) {
       if(ipproto == IPPROTO_TCP) {
-        if(conn->tcp.partial_send)
-          rv = handle_partial_send(tun, conn);
+        if(conn->tcp.tx_queue)
+          rv = handle_queued_tcp_data(tun, conn);
         else
           rv = handle_tcp_connect_async(tun, conn);
       } else
