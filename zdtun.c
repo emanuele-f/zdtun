@@ -1100,7 +1100,7 @@ static void fill_conn_sockaddr(zdtun_t *tun, zdtun_conn_t *conn,
 // its sequence number unchanged. This is needed to implement out of band
 // data.
 static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
-          zdtun_conn_t *conn, uint8_t no_ack) {
+          zdtun_conn_t *conn) {
   struct tcphdr *data = pkt->tcp;
   int family = (sock_ipver(tun, conn) == 4) ? PF_INET : PF_INET6;
   int val;
@@ -1350,13 +1350,11 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       debug("Write after server socket closed");
     }
 
-    if(!no_ack) {
-      // send the ACK
-      conn->tcp.client_seq += pkt->l7_len;
-      build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
+    // send the ACK
+    conn->tcp.client_seq += pkt->l7_len;
+    build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
 
-      return send_to_client(tun, conn, TCP_HEADER_LEN);
-    }
+    return send_to_client(tun, conn, TCP_HEADER_LEN);
   }
 
   return 0;
@@ -1520,7 +1518,7 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
 
 /* ******************************************************* */
 
-static int zdtun_forward_full(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn, uint8_t no_ack) {
+int zdtun_forward(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
   int rv = 0;
 
   if(conn->status >= CONN_STATUS_CLOSED) {
@@ -1530,7 +1528,7 @@ static int zdtun_forward_full(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t
 
   switch(pkt->tuple.ipproto) {
     case IPPROTO_TCP:
-      rv = handle_tcp_fwd(tun, pkt, conn, no_ack);
+      rv = handle_tcp_fwd(tun, pkt, conn);
       break;
     case IPPROTO_UDP:
       rv = handle_udp_fwd(tun, pkt, conn);
@@ -1551,18 +1549,6 @@ static int zdtun_forward_full(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t
   }
 
   return rv;
-}
-
-/* ******************************************************* */
-
-int zdtun_forward(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
-  return zdtun_forward_full(tun, pkt, conn, 0 /* send ACK to the client */);
-}
-
-/* ******************************************************* */
-
-int zdtun_send_oob(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
-  return zdtun_forward_full(tun, pkt, conn, 1 /* do not send ACK to the client */);
 }
 
 /* ******************************************************* */

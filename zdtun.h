@@ -463,22 +463,6 @@ zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, int pkt_len)
 int zdtun_forward(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn);
 
 /*
- * Send a client packet containing out of band data through the pivot.
- *
- * This can be used to inject additional data, not present in the
- * original TCP communication, without breaking the original TCP stream.
- * The client won't know anything about this data, only the TCP receiver
- * will.
- *
- * @param tun a zdtun instance.
- * @param pkt the oob data to send.
- * @param conn the connection, obtained by calling zdtun_lookup.
- *
- * @return 0 on success, errcode otherwise.
- */
-int zdtun_send_oob(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn);
-
-/*
  * Look up a flow or create it if it's not found.
  *
  * @param tun a zdtun instance.
