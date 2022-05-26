@@ -479,8 +479,9 @@ static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
   } else {
     debug("send_client failed [%d]", rv);
 
-    // important: set this to prevent close_conn to call send_to_client again in a loop
-    conn->tcp.fin_ack_sent = 1;
+    if(conn->tuple.ipproto == IPPROTO_TCP)
+        // important: set this to prevent close_conn to call send_to_client again in a loop
+        conn->tcp.fin_ack_sent = 1;
 
     zdtun_conn_close(tun, conn, CONN_STATUS_CLIENT_ERROR);
   }
