@@ -1005,7 +1005,8 @@ int zdtun_parse_pkt(zdtun_t *tun, const char *_pkt_buf, uint16_t pkt_len, zdtun_
       return -1;
     }
 
-    if((data->type != ICMP_ECHO) && (data->type != ICMP_ECHOREPLY)) {
+    if((data->type != ICMP_ECHO) && (data->type != ICMP_ECHOREPLY) &&
+        (data->type != ICMPv6_ECHO) && (data->type != ICMPv6_ECHOREPLY)) {
       debug("Discarding unsupported ICMP[%d]", data->type);
       return -2;
     }
@@ -1013,7 +1014,7 @@ int zdtun_parse_pkt(zdtun_t *tun, const char *_pkt_buf, uint16_t pkt_len, zdtun_
     pkt->l4_hdr_len = sizeof(struct icmphdr);
 
     // NOTE: echo ID in the source port is the same convention used by linux for ICMP connections
-    if(data->type == ICMP_ECHO) {
+    if((data->type == ICMP_ECHO) || (data->type == ICMPv6_ECHO)) {
       pkt->tuple.echo_id = data->un.echo.id;
       pkt->tuple.dst_port = 0;
     } else {
@@ -1777,6 +1778,9 @@ static int handle_tcp_connect_async(zdtun_t *tun, zdtun_conn_t *conn) {
       rv = tcp_socket_syn(tun, conn);
       conn->tstamp = zdtun_now(tun);
     } else {
+#ifndef WIN32
+      errno = optval;
+#endif
       close_with_socket_error(tun, conn, "TCP non-blocking connect");
       rv = -1;
     }
