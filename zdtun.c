@@ -72,12 +72,11 @@ typedef struct {
   uint16_t dport;
 } ip_frag_ports_t;
 
-// enables UDP sockets reuse for STUN
+// Keeps track of the client UDP ports numbers (see bind_and_connect_udp)
 typedef struct {
-  uint32_t key;
-  uint8_t num_uses;
-  socket_t sock;
-  zdtun_conn_t *last_mapped;
+  uint32_t key;         // combination of ipver and port number
+  uint16_t port;        // the local port associated to the client port
+  uint16_t num_uses;    // number of connections using this client port
   UT_hash_handle hh;
 } udp_mapping_t;
 
@@ -121,9 +120,6 @@ typedef struct zdtun_conn {
         uint8_t client_closed:1;
       };
     } tcp;
-    struct {
-        uint8_t can_rx;        // to handle rx in tun->udp_mappings
-    } udp;
   };
 
   struct {
@@ -630,8 +626,6 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
 // will be (later) destroyed by zdtun_purge_expired.
 // May be called multiple times.
 void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t status) {
-  int do_close = 1;
-
   if(conn->status >= CONN_STATUS_CLOSED)
     return;
 
@@ -641,24 +635,13 @@ void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t stat
 
     HASH_FIND(hh, tun->udp_mappings, &key, sizeof(key), mapping);
 
-    // the socket may not correspond (e.g. if the num_uses was 255)
-    if(mapping && (mapping->sock == conn->sock)) {
-      if(mapping->last_mapped == conn)
-        mapping->last_mapped = NULL;
-
-      if(--mapping->num_uses > 0)
-        do_close = 0;
-      else {
-        // zero uses, can free and close (do_close=1)
-        HASH_DELETE(hh, tun->udp_mappings, mapping);
-        free(mapping);
-      }
+    if(mapping && (--mapping->num_uses == 0)) {
+      HASH_DELETE(hh, tun->udp_mappings, mapping);
+      free(mapping);
     }
   }
 
-  if(do_close)
-    close_socket(tun, conn->sock);
-
+  close_socket(tun, conn->sock);
   conn->sock = INVALID_SOCKET;
 
   if((conn->tuple.ipproto == IPPROTO_TCP)
@@ -1364,88 +1347,163 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
 /* ******************************************************* */
 
+static int fill_ipv6_bind_addr(struct sockaddr_in6 *addr) {
+  struct addrinfo *ainfo = NULL;
+  struct addrinfo hint = {};
+
+  hint.ai_flags = AI_NUMERICHOST | AI_PASSIVE;
+  hint.ai_family = AF_INET6;
+  hint.ai_socktype = SOCK_DGRAM;
+  hint.ai_protocol = IPPROTO_UDP;
+
+  if(getaddrinfo("::0", NULL, &hint, &ainfo) < 0) {
+    error("getaddrinfo failed");
+    return -1;
+  }
+
+  if(!ainfo || (ainfo->ai_family != AF_INET6)) {
+    error("getaddrinfo invalid family");
+    freeaddrinfo(ainfo);
+    return -1;
+  }
+
+  *addr = *(struct sockaddr_in6*)ainfo->ai_addr;
+  freeaddrinfo(ainfo);
+  return 0;
+}
+
+/* ******************************************************* */
+
+// UDP socket operations:
+//  - bind: picks up a local port for inbound packets. This is normally done
+//    by sendto, but here we will possibly reuse an existing port from udp_mapping_t
+//    to make STUN to work properly
+//  - connect: ensures that the socket can only send/receive from the specified peer.
+//    Moreover, it speeds up send/sendto, removing route lookup on each packet
+static int bind_and_connect_udp(zdtun_t *tun, zdtun_conn_t *conn) {
+  uint8_t ipver = sock_ipver(tun, conn);
+  struct sockaddr_in6 bind_addr = {0};
+  socklen_t addrlen = (ipver == 4) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6);
+
+  if(ipver == 6) {
+    if(fill_ipv6_bind_addr(&bind_addr) < 0) {
+      zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
+      return -1;
+    }
+  }
+
+  uint32_t key = udp_mapping_key(&conn->tuple);
+  udp_mapping_t *mapping;
+
+  HASH_FIND(hh, tun->udp_mappings, &key, sizeof(key), mapping);
+  if(mapping != NULL) {
+    // If the client opens a UDP connection with the same source port of an
+    // existing (not purged) connection, then reuse the existing local port.
+    // This makes NAT traversal protocols like STUN work.
+    if(ipver == 4)
+      ((struct sockaddr_in*)&bind_addr)->sin_port = mapping->port;
+    else
+      bind_addr.sin6_port = mapping->port;
+  } // else pick a random local port (see below getsockname)
+
+  // port can be used by multiple sockets (when mapping->num_uses > 1)
+  if(setsockopt(conn->sock, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
+    close_with_socket_error(tun, conn, "UDP SO_REUSEADDR");
+    return -1;
+  }
+
+  if(bind(conn->sock, (struct sockaddr *) &bind_addr, addrlen) == SOCKET_ERROR) {
+    close_with_socket_error(tun, conn, "UDP bind");
+    return -1;
+  }
+
+  struct sockaddr_in6 servaddr = {0};
+  fill_conn_sockaddr(tun, conn, &servaddr, &addrlen);
+
+  if(connect(conn->sock, (struct sockaddr *) &servaddr, addrlen) == SOCKET_ERROR) {
+    close_with_socket_error(tun, conn, "UDP connect");
+    return -1;
+  }
+
+  if(mapping == NULL) {
+    // random port was requested with bind, get the assigned port number
+    if(getsockname(conn->sock, (struct sockaddr *)&bind_addr, &addrlen) < 0) {
+      close_with_socket_error(tun, conn, "UDP getsockname");
+      return -1;
+    }
+
+    safe_alloc(mapping, udp_mapping_t);
+    mapping->key = key;
+    mapping->port = (ipver == 4) ? ((struct sockaddr_in*)&bind_addr)->sin_port : bind_addr.sin6_port;
+    mapping->num_uses = 1;
+
+    HASH_ADD(hh, tun->udp_mappings, key, sizeof(key), mapping);
+  } else if(mapping->num_uses < (uint16_t)-1) {
+    mapping->num_uses++;
+    debug("Reusing UDP port: client=%d, local=%d", htons(conn->tuple.src_port), htons(mapping->port));
+  }
+
+  return 0;
+}
+
+/* ******************************************************* */
+
 static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
   struct udphdr *data = pkt->udp;
   uint8_t ipver = sock_ipver(tun, conn);
   int family = (ipver == 4) ? PF_INET : PF_INET6;
 
   if(conn->status == CONN_STATUS_NEW) {
-    // If the client opens a new UDP connection with the same source port,
-    // then reuse the existing UDP socket (and local port). This makes
-    // NAT traversal protocols like STUN work.
-    socket_t udp_sock = INVALID_SOCKET;
-    udp_mapping_t *mapping;
-    uint32_t key = udp_mapping_key(&conn->tuple);
+    debug("Allocating new UDP socket for port %d", ntohs(data->uh_sport));
 
-    HASH_FIND(hh, tun->udp_mappings, &key, sizeof(key), mapping);
-    if((mapping == NULL) || (mapping->num_uses == 255)) {
-      debug("Allocating new UDP socket for port %d", ntohs(data->uh_sport));
-
-      udp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_UDP);
-      if(udp_sock == INVALID_SOCKET) {
-        error("Cannot create UDP socket[%d]", socket_errno);
-        return -1;
-      }
-
-      // Check for broadcasts/multicasts
-      if(ipver == 4) {
-        if(conn->tuple.dst_ip.ip4 == INADDR_BROADCAST) {
-          int on = 1;
-
-          debug("UDP4 broadcast detected");
-
-          if(setsockopt(udp_sock, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on)))
-            error("UDP setsockopt SO_BROADCAST failed[%d]: %s", errno, strerror(errno));
-        }
-      } else {
-        // Adapted from netguard/udp.c
-        if(conn->tuple.dst_ip.ip6.s6_addr[0] == 0xFF) {
-          debug("UDP6 broadcast detected");
-
-          int loop = 1; // true
-          if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &loop, sizeof(loop)))
-            error("UDP setsockopt IPV6_MULTICAST_LOOP failed[%d]: %s",
-                    errno, strerror(errno));
-
-          int ttl = -1; // route default
-          if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &ttl, sizeof(ttl)))
-            error("UDP setsockopt IPV6_MULTICAST_HOPS failed[%d]: %s",
-                    errno, strerror(errno));
-
-          struct ipv6_mreq mreq6;
-          memcpy(&mreq6.ipv6mr_multiaddr, &conn->tuple.dst_ip.ip6, 16);
-          mreq6.ipv6mr_interface = INADDR_ANY;
-
-          if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &mreq6, sizeof(mreq6)))
-            error("UDP setsockopt IPV6_ADD_MEMBERSHIP failed[%d]: %s",
-                    errno, strerror(errno));
-        }
-      }
-
-      if(mapping == NULL) {
-        safe_alloc(mapping, udp_mapping_t);
-        mapping->key = key;
-        mapping->num_uses = 1;
-        mapping->sock = udp_sock;
-        mapping->last_mapped = conn;
-
-        HASH_ADD(hh, tun->udp_mappings, key, sizeof(key), mapping);
-      }
-    } else {
-      debug("Reusing existing UDP socket for port %d", ntohs(data->uh_sport));
-
-      udp_sock = mapping->sock;
-      mapping->num_uses++;
-
-      // Only 1 connection sharing the socket can rx, the most recent one
-      if(mapping->last_mapped)
-        mapping->last_mapped->udp.can_rx = 0;
-      mapping->last_mapped = conn;
+    socket_t udp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_UDP);
+    if(udp_sock == INVALID_SOCKET) {
+      error("Cannot create UDP socket[%d]", socket_errno);
+      return -1;
     }
 
     conn->sock = udp_sock;
+
+    // Check for broadcasts/multicasts
+    if(ipver == 4) {
+      if(conn->tuple.dst_ip.ip4 == INADDR_BROADCAST) {
+        int on = 1;
+
+        debug("UDP4 broadcast detected");
+
+        if(setsockopt(udp_sock, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on)))
+          error("UDP setsockopt SO_BROADCAST failed[%d]: %s", errno, strerror(errno));
+      }
+    } else {
+      // Adapted from netguard/udp.c
+      if(conn->tuple.dst_ip.ip6.s6_addr[0] == 0xFF) {
+        debug("UDP6 broadcast detected");
+
+        int loop = 1; // true
+        if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &loop, sizeof(loop)))
+          error("UDP setsockopt IPV6_MULTICAST_LOOP failed[%d]: %s",
+                  errno, strerror(errno));
+
+        int ttl = -1; // route default
+        if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &ttl, sizeof(ttl)))
+          error("UDP setsockopt IPV6_MULTICAST_HOPS failed[%d]: %s",
+                  errno, strerror(errno));
+
+        struct ipv6_mreq mreq6;
+        memcpy(&mreq6.ipv6mr_multiaddr, &conn->tuple.dst_ip.ip6, 16);
+        mreq6.ipv6mr_interface = INADDR_ANY;
+
+        if(setsockopt(udp_sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &mreq6, sizeof(mreq6)))
+          error("UDP setsockopt IPV6_ADD_MEMBERSHIP failed[%d]: %s",
+                  errno, strerror(errno));
+      }
+    }
+
+    // TODO exclude broadcast/multicast addresses?
+    if(bind_and_connect_udp(tun, conn) < 0)
+      return -1;
+
     conn->status = CONN_STATUS_CONNECTED;
-    conn->udp.can_rx = 1;
   }
 
   if(tun->callbacks.account_packet)
@@ -1455,6 +1513,7 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
   socklen_t addrlen;
   fill_conn_sockaddr(tun, conn, &servaddr, &addrlen);
 
+  // NOTE: if the UDP socket is connected (see unicast handling above), servaddr will be ignored
   if(sendto(conn->sock, pkt->l7, pkt->l7_len, 0, (struct sockaddr*)&servaddr, addrlen) < 0) {
     close_with_socket_error(tun, conn, "UDP sendto");
     return 0;
@@ -1854,10 +1913,9 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
     if(FD_ISSET(conn->sock, rd_fds)) {
       if(ipproto == IPPROTO_TCP)
         rv = handle_tcp_reply(tun, conn);
-      else if(ipproto == IPPROTO_UDP) {
-        if(conn->udp.can_rx)
-          rv = handle_udp_reply(tun, conn);
-      } else if(ipproto == IPPROTO_ICMP)
+      else if(ipproto == IPPROTO_UDP)
+        rv = handle_udp_reply(tun, conn);
+      else if(ipproto == IPPROTO_ICMP)
         rv = handle_icmp_reply(tun, conn);
       else
         error("Unhandled socket.rd proto: %d", ipproto);

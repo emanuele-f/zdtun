@@ -122,6 +122,7 @@ typedef SOCKET socket_t;
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/sockios.h>
+#include <netdb.h>
 
 #define SOL_TCP 6
 #define TCP_NODELAY 1
