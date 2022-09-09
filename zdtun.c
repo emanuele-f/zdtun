@@ -1509,12 +1509,7 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
   if(tun->callbacks.account_packet)
     tun->callbacks.account_packet(tun, pkt, 1 /* to zdtun */, conn);
 
-  struct sockaddr_in6 servaddr = {0};
-  socklen_t addrlen;
-  fill_conn_sockaddr(tun, conn, &servaddr, &addrlen);
-
-  // NOTE: if the UDP socket is connected (see unicast handling above), servaddr will be ignored
-  if(sendto(conn->sock, pkt->l7, pkt->l7_len, 0, (struct sockaddr*)&servaddr, addrlen) < 0) {
+  if(send(conn->sock, pkt->l7, pkt->l7_len, 0) < 0) {
     close_with_socket_error(tun, conn, "UDP sendto");
     return 0;
   }
