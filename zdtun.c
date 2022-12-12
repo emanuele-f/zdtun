@@ -101,6 +101,7 @@ typedef struct zdtun_conn {
   socket_t sock;
   zdtun_conn_status_t status;
 
+  proxy_t *dnat;
   proxy_mode_t proxy_mode;
   socks5_status_t socks5_status;
   uint8_t socks5_skip;
@@ -145,7 +146,6 @@ typedef struct zdtun_t {
   char reply_buf[REPLY_BUF_SIZE];
 
   proxy_t socks5;
-  proxy_t dnat;
 
   char *socks5_user;
   char *socks5_pass;
@@ -201,7 +201,7 @@ void zdtun_fds(zdtun_t *tun, int *max_fd, fd_set *rdfd, fd_set *wrfd) {
 
 static uint8_t sock_ipver(zdtun_t *tun, zdtun_conn_t *conn) {
   if(conn->proxy_mode == PROXY_DNAT)
-    return tun->dnat.ipver;
+    return conn->dnat->ipver;
   else if(conn->proxy_mode == PROXY_SOCKS5)
     return tun->socks5.ipver;
   else
@@ -367,15 +367,6 @@ void zdtun_set_socks5_userpass(zdtun_t *tun, const char *username, const char *p
 
 /* ******************************************************* */
 
-void zdtun_set_dnat_info(zdtun_t *tun, const zdtun_ip_t *proxy_ip,
-        uint16_t proxy_port, uint8_t ipver) {
-  tun->dnat.ip = *proxy_ip;
-  tun->dnat.port = proxy_port;
-  tun->dnat.ipver = ipver;
-}
-
-/* ******************************************************* */
-
 /* Connection methods */
 void* zdtun_conn_get_userdata(const zdtun_conn_t *conn) {
   return conn->user_data;
@@ -402,11 +393,23 @@ socket_t zdtun_conn_get_socket(const zdtun_conn_t *conn) {
 }
 
 void zdtun_conn_proxy(zdtun_conn_t *conn) {
+  // NOTE: only TCP is currently supported
   if(conn->tuple.ipproto == IPPROTO_TCP)
     conn->proxy_mode = PROXY_SOCKS5;
 }
 
-void zdtun_conn_dnat(zdtun_conn_t *conn) {
+void zdtun_conn_dnat(zdtun_conn_t *conn, const zdtun_ip_t *proxy_ip, uint16_t proxy_port, uint8_t ipver) {
+  proxy_t *proxy;
+  safe_alloc(proxy, proxy_t);
+
+  proxy->ip = *proxy_ip;
+  proxy->port = proxy_port;
+  proxy->ipver = ipver;
+
+  if(conn->dnat)
+    free(conn->dnat);
+
+  conn->dnat = proxy;
   conn->proxy_mode = PROXY_DNAT;
 }
 
@@ -678,6 +681,9 @@ static void destroy_conn(zdtun_t *tun, zdtun_conn_t *conn) {
   debug("PURGE SOCKET (type=%d)", conn->tuple.ipproto);
 
   zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
+
+  if(conn->dnat)
+    free(conn->dnat);
 
   switch(conn->tuple.ipproto) {
     case IPPROTO_TCP:
@@ -1058,10 +1064,10 @@ int zdtun_cmp_ip(int ipver, zdtun_ip_t *ip_a, zdtun_ip_t *ip_b) {
 static void fill_conn_sockaddr(zdtun_t *tun, zdtun_conn_t *conn,
         struct sockaddr_in6 *addr6, socklen_t *addrlen) {
   uint8_t ipver = sock_ipver(tun, conn);
-  proxy_t *proxy;
+  const proxy_t *proxy;
 
   if(conn->proxy_mode == PROXY_DNAT)
-    proxy = &tun->dnat;
+    proxy = conn->dnat;
   else if(conn->proxy_mode == PROXY_SOCKS5)
     proxy = &tun->socks5;
   else
