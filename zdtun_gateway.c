@@ -37,6 +37,7 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <linux/if.h>
 
 #include <netinet/udp.h>
 #include <netinet/tcp.h>
@@ -53,6 +54,8 @@
 #define TUN_IP            "10.66.12.1"
 #define TUN_GATEWAY_IP    "10.66.12.2"
 #define TUN_NETMASK       "255.255.255.0"
+#define TUN_IP6           "fd12:3456:789a:1::1/64"
+#define TUN_GATEWAY_IP6   "fd12:3456:789a:1::2"
 
 // TUN routing details
 #define RT_ORIG_GW_RULE   "16000"
@@ -179,6 +182,8 @@ static void term_handler(int signo) {
 
 /* ******************************************************* */
 
+static int has_ipv6 = 0;
+
 static void setup_zdtun_routing() {
   u_int32_t gw = get_default_gw();
 
@@ -195,16 +200,39 @@ static void setup_zdtun_routing() {
   // Setup the new gateway table. It will also match local networks.
   cmd("ip route add default via " TUN_GATEWAY_IP " table " RT_TUN_GW_TABLE);
   cmd("ip rule add pref " RT_TUN_GW_RULE " table " RT_TUN_GW_TABLE);
+
+  // IPv6
+  struct in6_addr gw6_addr;
+  char iface6[IFNAMSIZ + 1];
+
+  if(get_default_gw6_and_iface(&gw6_addr, iface6) == 0) {
+    char gw6[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, &gw6_addr, gw6, sizeof(gw6));
+
+    cmd("ip -6 addr add %s dev %s", TUN_IP6, TUN_DEV);
+
+    cmd("ip -6 route add default via %s dev %s table " RT_ORIG_GW_TABLE, gw6, iface6);
+    cmd("ip -6 rule add fwmark 0x%x/0xff pref " RT_ORIG_GW_RULE " table " RT_ORIG_GW_TABLE, FWMARK_ORIG_GW);
+    cmd("ip -6 route add default via " TUN_GATEWAY_IP6 " table " RT_TUN_GW_TABLE);
+    cmd("ip -6 rule add pref " RT_TUN_GW_RULE " table " RT_TUN_GW_TABLE);
+    has_ipv6 = 1;
+  }
 }
 
 /* ******************************************************* */
 
 static void cleanup_zdtun_routing() {
-  cmd("ip rule del pref " RT_ORIG_GW_RULE);
-  cmd("ip route flush table " RT_ORIG_GW_TABLE);
+  const char *ipver[] = {"", " -6"};
 
-  cmd("ip rule del pref " RT_TUN_GW_RULE);
-  cmd("ip route flush table " RT_TUN_GW_TABLE);
+  for(int i=0; i<(has_ipv6 ? 2 : 1); i++) {
+    const char* ipv = ipver[i];
+
+    cmd("ip%s rule del pref " RT_ORIG_GW_RULE, ipv);
+    cmd("ip%s route flush table " RT_ORIG_GW_TABLE, ipv);
+
+    cmd("ip%s rule del pref " RT_TUN_GW_RULE, ipv);
+    cmd("ip%s route flush table " RT_TUN_GW_TABLE, ipv);
+  }
 }
 
 /* ******************************************************* */

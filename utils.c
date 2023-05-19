@@ -310,3 +310,39 @@ u_int32_t get_default_gw() {
 
   return(gwip);
 }
+
+/* ******************************************************* */
+
+int get_default_gw6_and_iface(struct in6_addr *gw, char *iface) {
+  FILE *fd;
+  char buf[256];
+  int rv = 1;
+
+  if(!(fd = fopen("/proc/net/ipv6_route", "r")))
+    return(-errno);
+
+  while(fgets(buf, sizeof(buf), fd)) {
+    char gw_hex[33];
+    char cur_if[IFNAMSIZ + 1];
+
+    if(sscanf(buf, "00000000000000000000000000000000 %*X %*X %*X %32s %*X %*X %*X %*X %s", gw_hex, cur_if) == 2) {
+      if(strcmp(cur_if, "lo") != 0) {
+        uint32_t *out = (uint32_t*) gw;
+        for(int i=0; i<4; i++) {
+          int end_idx = (i+1) * 8;
+          char tmp = gw_hex[end_idx];
+          gw_hex[end_idx] = '\0';
+          out[i] = ntohl(strtoul(&gw_hex[i*8], NULL, 16));
+          gw_hex[end_idx] = tmp;
+        }
+
+        strcpy(iface, cur_if);
+        rv = 0;
+        break;
+      }
+    }
+  }
+
+  fclose(fd);
+  return(rv);
+}

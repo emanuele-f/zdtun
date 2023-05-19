@@ -47,5 +47,6 @@ void xor_encdec(char *data, int data_len, char *key);
 int open_tun(const char *tun_dev, const char*ip, const char *netmask);
 void cmd(const char *fmt, ...);
 u_int32_t get_default_gw();
+int get_default_gw6_and_iface(struct in6_addr *gw, char *iface);
 
 #endif
