@@ -257,6 +257,7 @@ static socket_t open_socket(zdtun_t *tun, int domain, int type, int protocol) {
       tun->stats.num_tcp_opened++;
       break;
     case IPPROTO_ICMP:
+    case IPPROTO_ICMPV6:
       tun->stats.num_icmp_opened++;
       break;
   }
@@ -579,7 +580,7 @@ uint16_t zdtun_l3_checksum(zdtun_t *tun, zdtun_conn_t *conn, char *ipbuf, char *
     pseudo.ip6ph_src = ip_header->saddr;
     pseudo.ip6ph_dst = ip_header->daddr;
     pseudo.ip6ph_len = ip_header->payload_len;
-    pseudo.ip6ph_nxt = ipproto;
+    pseudo.ip6ph_nxt = ((ipver == 6) && (ipproto == IPPROTO_ICMP)) ? IPPROTO_ICMPV6 : ipproto;
 
     rv = calc_checksum(rv, (uint8_t*)&pseudo, sizeof(pseudo));
   }
@@ -1532,10 +1533,10 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
   struct icmphdr *data = pkt->icmp;
   const uint16_t icmp_len = pkt->l4_hdr_len + pkt->l7_len;
 
-  // NOTE: PF_INET6 is not currently supported by SOCK_DGRAM ICMP
-  int family = (sock_ipver(tun, conn) == 4) ? PF_INET : PF_INET6;
-
   if(conn->status == CONN_STATUS_NEW) {
+    int family = (sock_ipver(tun, conn) == 4) ? PF_INET : PF_INET6;
+    int proto = (family == PF_INET) ? IPPROTO_ICMP : IPPROTO_ICMPV6;
+
     /*
      * Either a SOCK_RAW or SOCK_DGRAM can be used. The SOCK_DGRAM, however, does not require root
      * privileges, so it is a better choice (also for Android). See https://lwn.net/Articles/443051
@@ -1546,7 +1547,7 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
      *  - The reply received via recv misses the IP header.
      *  - Does not honor all the ICMP header fields (e.g. the ICMP echo ID).
      */
-    socket_t icmp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_ICMP);
+    socket_t icmp_sock = open_socket(tun, family, SOCK_DGRAM, proto);
     debug("Allocating new ICMP socket for id %d", ntohs(data->un.echo.id));
 
     if(icmp_sock == INVALID_SOCKET) {
@@ -1674,7 +1675,8 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
   struct icmphdr *data = (struct icmphdr*) &tun->reply_buf[iphdr_len];
 
-  if((data->type != ICMP_ECHO) && (data->type != ICMP_ECHOREPLY)) {
+  if((data->type != ICMP_ECHO) && (data->type != ICMP_ECHOREPLY) &&
+	  (data->type != ICMPv6_ECHO) && (data->type != ICMPv6_ECHOREPLY)) {
     debug("Discarding unsupported ICMP[%d]", data->type);
     zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
     return 0;
@@ -1688,10 +1690,16 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
   conn->tstamp = zdtun_now(tun);
 
+  uint8_t ipver = sock_ipver(tun, conn);
+
   data->checksum = 0;
-  data->checksum = ~calc_checksum(data->checksum, (u_int8_t*)data, icmp_len);
+  if(ipver == 4)
+    data->checksum = ~calc_checksum(data->checksum, (u_int8_t*)data, icmp_len);
 
   zdtun_make_iphdr(tun, conn, tun->reply_buf, icmp_len);
+
+  if(ipver == 6)
+    data->checksum = zdtun_l3_checksum(tun, conn, tun->reply_buf, (char*)data, icmp_len);
 
   return send_to_client(tun, conn, icmp_len);
 }
