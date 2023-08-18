@@ -899,6 +899,15 @@ int zdtun_parse_pkt(zdtun_t *tun, const char *_pkt_buf, uint16_t pkt_len, zdtun_
       return -1;
     }
 
+    uint16_t tot_len = ntohs(ip_header->tot_len);
+    if(tot_len < iphdr_len) {
+      debug("Invalid IPv4 packet: tot_len=%d, hdr_len=%d", tot_len, iphdr_len);
+      return -1;
+    }
+
+    // exclude non-IP data
+    pkt_len = min(pkt_len, tot_len);
+
     pkt->tuple.src_ip.ip4 = ip_header->saddr;
     pkt->tuple.dst_ip.ip4 = ip_header->daddr;
     ipproto = ip_header->protocol;
@@ -925,6 +934,10 @@ int zdtun_parse_pkt(zdtun_t *tun, const char *_pkt_buf, uint16_t pkt_len, zdtun_
       debug("IPv6 extensions not supported: %d", ip_header->nexthdr);
       return -1;
     }
+
+    // exclude non-IP data
+    uint16_t payload_len = ntohs(ip_header->payload_len);
+    pkt_len = min(pkt_len, payload_len + iphdr_len);
 
     pkt->tuple.src_ip.ip6 = ip_header->saddr;
     pkt->tuple.dst_ip.ip6 = ip_header->daddr;
