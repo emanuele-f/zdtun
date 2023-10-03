@@ -1,12 +1,14 @@
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.18)
 
 # A C project
 project(C)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
+set(ZDTUN_SOURCES zdtun.c utils.c)
+
 if(ANDROID)
-  ADD_LIBRARY(zdtun STATIC zdtun.c utils.c)
+  ADD_LIBRARY(zdtun STATIC ${ZDTUN_SOURCES})
 
   TARGET_LINK_LIBRARIES(zdtun)
   add_definitions(-DANDROID)
@@ -15,8 +17,9 @@ if(ANDROID)
 
   TARGET_LINK_LIBRARIES(zdtun ${log-lib})
 else()
-  ADD_LIBRARY(zdtun STATIC zdtun.c utils.c)
-  ADD_LIBRARY(zdtun_dbg STATIC zdtun.c utils.c)
+  ADD_LIBRARY(zdtun SHARED ${ZDTUN_SOURCES})
+  ADD_LIBRARY(zdtun_static STATIC ${ZDTUN_SOURCES})
+  ADD_LIBRARY(zdtun_dbg SHARED ${ZDTUN_SOURCES})
 
   add_executable(zdtun_pivot zdtun_pivot.c)
   add_executable(zdtun_client zdtun_client.c utils.c)
@@ -29,6 +32,7 @@ else()
   TARGET_LINK_LIBRARIES(zdtun_pivot zdtun_dbg)
 
   set_target_properties(zdtun PROPERTIES COMPILE_FLAGS -DNO_DEBUG)
+  set_target_properties(zdtun_static PROPERTIES OUTPUT_NAME zdtun)
 endif()
 
 if(WIN32)
