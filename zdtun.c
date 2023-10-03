@@ -1209,7 +1209,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       uint8_t len;
 
       if(kind == 1) { // NOP
-        optslen++;
+        optslen--;
         continue;
       }
 
