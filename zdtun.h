@@ -261,6 +261,12 @@ typedef enum {
   CONN_STATUS_SOCKS5_ERROR,
 } zdtun_conn_status_t;
 
+typedef enum {
+  ZDTUN_OK = 0,
+  ZDTUN_IGNORE,   // the packet should be ignore
+  ZDTUN_ERROR,    // an error occurred
+} zdtun_rv;
+
 /*
  * @brief A connections iterator.
  * @return 0 to continue iteration, != 0 to abort it.
@@ -320,6 +326,28 @@ typedef struct zdtun_callbacks {
    * @param conn_info information about the connection. User provided user_data should be manually freed.
    */
   void (*on_connection_close) (zdtun_t *tun, const zdtun_conn_t *conn_info);
+
+  /*
+   * @brief [experimental] A custom callback to forward data
+   *
+   * When this callback is set, the forwarding of data via the internal
+   * sockets is disabled, providing the opportunity to use some custom logic.
+   *
+   * In essence, when zdtun_forward is called, this callback will be invoked
+   * instead. In case of TCP data, the callback must call zdtun_tcp_client_ack
+   * after successfully forwarding the L7 data, to update the sequence numbers.
+   *
+   * Since the no internal sockets will be used, calling zdtun_handle_fd is not
+   * necessary any more. Instead, the zdtun_handle_tcp_reply and zdtun_handle_udp_reply
+   * functions should be used to process downstream data.
+   *
+   * @param tun the zdtun instance
+   * @param pkt the packet containing L7 data to be forwarded
+   * @param conn_info information about the connection
+   *
+   * @return ZDTUN_OK, ZDTUN_IGNORE or ZDTUN_ERROR
+   */
+  zdtun_rv (*custom_forward) (zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn_info);
 } zdtun_callbacks_t;
 
 /*
@@ -459,9 +487,9 @@ zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, int pkt_len)
  * @param pkt the packet to forward.
  * @param conn the connection, obtained by calling zdtun_lookup.
  *
- * @return 0 on success, errcode otherwise.
+ * @return ZDTUN_OK, ZDTUN_IGNORE or ZDTUN_ERROR
  */
-int zdtun_forward(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn);
+zdtun_rv zdtun_forward(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn);
 
 /*
  * Look up a flow or create it if it's not found.
@@ -515,7 +543,9 @@ zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn);
 socket_t zdtun_conn_get_socket(const zdtun_conn_t *conn);
 char* zdtun_5tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize);
 
+/************************************/
 /* Internal API - subject to change */
+/************************************/
 
 /*
  * Returns the size of the IP header sent to the client.
@@ -541,5 +571,23 @@ void zdtun_make_iphdr(zdtun_t *tun, zdtun_conn_t *conn, char *pkt_buf, u_int16_t
  *       Ensure to set the L3 header checksum to 0 before calling this function.
  */
 uint16_t zdtun_l3_checksum(zdtun_t *tun, zdtun_conn_t *conn, char *ipbuf, char *l3, uint16_t l3_len);
+
+/*
+ * Confirms the forwarding of num_bytes for a TCP connection.
+ * This should only be called from the custom_forward callback.
+ */
+int zdtun_tcp_client_ack(zdtun_t *tun, zdtun_conn_t *conn, int num_bytes);
+
+/*
+ * Handle a TCP payload from the pivot.
+ * This should only be called from the custom_forward callback.
+ */
+int zdtun_handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn, const char* payload, int l4_len);
+
+/*
+ * Handle a UDP payload from the pivot.
+ * This should only be called from the custom_forward callback.
+ */
+int zdtun_handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn, const char* payload, int l4_len);
 
 #endif

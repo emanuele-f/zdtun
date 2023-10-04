@@ -614,7 +614,10 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   // buffer and reduce the TCP window accordingly. If a 0 window is sent,
   // the client will periodically send TCP_KEEPALIVE to wake the connection.
   // This prevents connection stall.
-  tcpwin = min(get_available_sndbuf(conn), max_win);
+  if(!tun->callbacks.custom_forward)
+    tcpwin = min(get_available_sndbuf(conn), max_win);
+  else
+    tcpwin = max_win;
 #endif
 
   tcp->th_win = htons(tcpwin >> conn->tcp.window_scale);
@@ -1139,12 +1142,7 @@ static int enqueue_tcp_data(zdtun_t *tun, zdtun_conn_t *conn, const char *buf, i
 
 /* ******************************************************* */
 
-// returns 0 on success
-// returns <0 on error
-// no_ack: can be used to avoid sending the ACK to the client and keep
-// its sequence number unchanged. This is needed to implement out of band
-// data.
-static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
+static zdtun_rv handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
           zdtun_conn_t *conn) {
   struct tcphdr *data = pkt->tcp;
   int family = (sock_ipver(tun, conn) == 4) ? PF_INET : PF_INET6;
@@ -1153,12 +1151,12 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   if(data->th_flags & TH_URG) {
     error("URG data not supported");
     zdtun_conn_close(tun, conn, CONN_STATUS_ERROR);
-    return -1;
+    return ZDTUN_ERROR;
   }
 
   if(conn->status == CONN_STATUS_CONNECTING) {
     debug("ignore TCP packet, we are connecting");
-    return 0;
+    return ZDTUN_IGNORE;
   } else if(conn->status == CONN_STATUS_NEW) {
     debug("Allocating new TCP socket for port %d", ntohs(conn->tuple.dst_port));
     socket_t tcp_sock = open_socket(tun, family, SOCK_STREAM, IPPROTO_TCP);
@@ -1166,7 +1164,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     if(tcp_sock == INVALID_SOCKET) {
       error("Cannot create TCP socket[%d]", socket_errno);
       conn->status = CONN_STATUS_SOCKET_ERROR;
-      return -1;
+      return ZDTUN_ERROR;
     }
 
     conn->sock = tcp_sock;
@@ -1235,13 +1233,15 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     conn->tcp.mss = mss;
 
     // connect with the server
-    if(connect(tcp_sock, (struct sockaddr *) &servaddr, addrlen) == SOCKET_ERROR) {
+    if(!tun->callbacks.custom_forward && connect(tcp_sock, (struct sockaddr *) &servaddr, addrlen) == SOCKET_ERROR) {
       if(socket_errno == socket_in_progress) {
         debug("Connection in progress");
         in_progress = 1;
       } else {
         close_with_socket_error(tun, conn, "TCP connect");
-        return 0;
+
+        // do not treat as an error, connect can fail
+        return ZDTUN_IGNORE;
       }
     }
 
@@ -1249,11 +1249,11 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     conn->tcp.zdtun_seq = 0x77EB77EB;
 
     if(!in_progress)
-      return tcp_socket_syn(tun, conn);
+      return (tcp_socket_syn(tun, conn) == 0) ? ZDTUN_OK : ZDTUN_ERROR;
 
     conn->status = CONN_STATUS_CONNECTING;
     FD_SET(tcp_sock, &tun->write_fds);
-    return 0;
+    return ZDTUN_OK;
   }
 
   // Here a connection is already active
@@ -1265,8 +1265,8 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     ((seq + 1) == conn->tcp.client_seq));
 
   if(!is_keep_alive && (seq != (conn->tcp.client_seq + conn->tcp.tx_queue_size))) {
-    debug("ignoring out of sequence data: expected %d, got %d", conn->tcp.client_seq, seq);
-    return 0;
+    debug("ignoring out of sequence data: expected %u, got %u\n", conn->tcp.client_seq, seq);
+    return ZDTUN_IGNORE;
   }
 
   if(socks5_in_progress(conn)) {
@@ -1274,14 +1274,14 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
         conn->socks5_status, pkt->l7_len, data->th_flags);
 
     zdtun_conn_close(tun, conn, CONN_STATUS_SOCKS5_ERROR);
-    return -1;
+    return ZDTUN_ERROR;
   }
 
   if(data->th_flags & TH_RST) {
     debug("Got TCP reset from client");
     zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
 
-    return 0;
+    return ZDTUN_OK;
   } else if((data->th_flags & (TH_FIN | TH_ACK)) == (TH_FIN | TH_ACK)) {
     int rv;
 
@@ -1306,7 +1306,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       // Both the client and the server have closed, terminate the connection
       zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
 
-    return rv;
+    return (rv == 0) ? ZDTUN_OK : ZDTUN_ERROR;
   }
 
   if((data->th_flags & TH_ACK) && (conn->sock != INVALID_SOCKET)) {
@@ -1321,7 +1321,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
 
       if(send_to_client(tun, conn, TCP_HEADER_LEN) != 0)
-        return -1;
+        return ZDTUN_ERROR;
     } else {
       // Received ACK from the client, update the window. Take into account
       // the in flight bytes which the client has not ACK-ed yet.
@@ -1356,13 +1356,14 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       // send the ACK
       conn->tcp.client_seq += pkt->l7_len;
       build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
-      return send_to_client(tun, conn, TCP_HEADER_LEN);
-    } else
+      return (send_to_client(tun, conn, TCP_HEADER_LEN) == 0) ? ZDTUN_OK : ZDTUN_ERROR;
+    } else if(!tun->callbacks.custom_forward)
       // data send is deferred to handle_queued_tcp_data, when socket will be ready for TX
-      return enqueue_tcp_data(tun, conn, pkt->l7, pkt->l7_len, data->th_flags);
+      return (enqueue_tcp_data(tun, conn, pkt->l7, pkt->l7_len, data->th_flags) == 0) ?
+        ZDTUN_OK : ZDTUN_ERROR;
   }
 
-  return 0;
+  return ZDTUN_OK;
 }
 
 /* ******************************************************* */
@@ -1468,18 +1469,18 @@ static int bind_and_connect_udp(zdtun_t *tun, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
-static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
+static zdtun_rv handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
   struct udphdr *data = pkt->udp;
   uint8_t ipver = sock_ipver(tun, conn);
   int family = (ipver == 4) ? PF_INET : PF_INET6;
 
-  if(conn->status == CONN_STATUS_NEW) {
+  if(!tun->callbacks.custom_forward && (conn->status == CONN_STATUS_NEW)) {
     debug("Allocating new UDP socket for port %d", ntohs(data->uh_sport));
 
     socket_t udp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_UDP);
     if(udp_sock == INVALID_SOCKET) {
       error("Cannot create UDP socket[%d]", socket_errno);
-      return -1;
+      return ZDTUN_ERROR;
     }
 
     conn->sock = udp_sock;
@@ -1521,7 +1522,7 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
 
     // TODO exclude broadcast/multicast addresses?
     if(bind_and_connect_udp(tun, conn) < 0)
-      return -1;
+      return ZDTUN_ERROR;
 
     conn->status = CONN_STATUS_CONNECTED;
   }
@@ -1529,20 +1530,22 @@ static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *co
   if(tun->callbacks.account_packet)
     tun->callbacks.account_packet(tun, pkt, 1 /* to zdtun */, conn);
 
-  if(send(conn->sock, pkt->l7, pkt->l7_len, 0) < 0) {
+  if(!tun->callbacks.custom_forward && send(conn->sock, pkt->l7, pkt->l7_len, 0) < 0) {
     close_with_socket_error(tun, conn, "UDP sendto");
-    return 0;
+
+    // do not treat as an error, send can fail
+    return ZDTUN_IGNORE;
   }
 
   check_dns_request(conn, pkt->l7, pkt->l7_len);
 
-  return 0;
+  return ZDTUN_OK;
 }
 
 /* ******************************************************* */
 
 /* NOTE: a collision may occure between ICMP packets seq from host and tunneled packets, we ignore it */
-static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
+static zdtun_rv handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
   struct icmphdr *data = pkt->icmp;
   const uint16_t icmp_len = pkt->l4_hdr_len + pkt->l7_len;
 
@@ -1566,7 +1569,7 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
     if(icmp_sock == INVALID_SOCKET) {
       error("Cannot create ICMP socket[%d]", socket_errno);
       conn->status = CONN_STATUS_SOCKET_ERROR;
-      return -1;
+      return ZDTUN_ERROR;
     }
 
     conn->sock = icmp_sock;
@@ -1580,26 +1583,28 @@ static int handle_icmp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *c
   if(tun->callbacks.account_packet)
     tun->callbacks.account_packet(tun, pkt, 1 /* to zdtun */, conn);
 
-  struct sockaddr_in6 servaddr = {0};
-  socklen_t addrlen;
-  fill_conn_sockaddr(tun, conn, &servaddr, &addrlen);
+  if(!tun->callbacks.custom_forward) {
+    struct sockaddr_in6 servaddr = {0};
+    socklen_t addrlen;
+    fill_conn_sockaddr(tun, conn, &servaddr, &addrlen);
 
-  if(sendto(conn->sock, data, icmp_len, 0, (struct sockaddr*)&servaddr, addrlen) < 0) {
-    close_with_socket_error(tun, conn, "ICMP sendto");
-    return -1;
+    if(sendto(conn->sock, data, icmp_len, 0, (struct sockaddr*)&servaddr, addrlen) < 0) {
+      close_with_socket_error(tun, conn, "ICMP sendto");
+      return ZDTUN_ERROR;
+    }
   }
 
-  return 0;
+  return ZDTUN_OK;
 }
 
 /* ******************************************************* */
 
-int zdtun_forward(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
-  int rv = 0;
+zdtun_rv zdtun_forward(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
+  zdtun_rv rv;
 
   if(conn->status >= CONN_STATUS_CLOSED) {
     debug("Refusing to forward closed connection");
-    return 0;
+    return ZDTUN_IGNORE;
   }
 
   switch(pkt->tuple.ipproto) {
@@ -1614,14 +1619,17 @@ int zdtun_forward(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
       break;
     default:
       error("Ignoring unhandled IP protocol %d", pkt->tuple.ipproto);
-      return -2;
+      return ZDTUN_IGNORE;
   }
 
-  if(rv == 0) {
+  if(rv == ZDTUN_OK) {
     conn->tstamp = zdtun_now(tun);
 
     if(conn->status == CONN_STATUS_NEW)
       error("Connection status must not be CONN_STATUS_NEW here!");
+
+    if(tun->callbacks.custom_forward && (conn->status < CONN_STATUS_CLOSED))
+      rv = tun->callbacks.custom_forward(tun, pkt, conn);
   }
 
   return rv;
@@ -1657,7 +1665,7 @@ zdtun_conn_t* zdtun_easy_forward(zdtun_t *tun, const char *pkt_buf, int pkt_len)
     return NULL;
   }
 
-  if(zdtun_forward(tun, &pkt, conn) != 0) {
+  if(zdtun_forward(tun, &pkt, conn) == ZDTUN_ERROR) {
     debug("zdtun_forward failed");
 
     /* Close the connection as soon an any error occurs */
@@ -1719,16 +1727,11 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
-static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
-  int iphdr_len = zdtun_iphdr_len(tun, conn);
-  char *payload_ptr = tun->reply_buf + iphdr_len + TCP_HEADER_LEN;
-  int to_recv = min(conn->tcp.window_size, conn->tcp.mss);
-  int l4_len = recv(conn->sock, payload_ptr, to_recv, 0);
-
+static int handle_tcp_reply_2(zdtun_t *tun, zdtun_conn_t *conn, char* payload_ptr, int l4_len) {
   conn->tstamp = zdtun_now(tun);
 
-  if(l4_len == SOCKET_ERROR)
-    return close_with_socket_error(tun, conn, "TCP recv");
+  if(l4_len < 0)
+    return -1;
   else if(l4_len == 0) {
     debug("Server socket closed");
 
@@ -1772,13 +1775,15 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   int flags = TH_ACK;
 
 #ifndef WIN32
-  // Since we cannot determine server message bounds, we assume that
-  // message ends when no more data is available in the socket buffer.
-  int count = 0;
-  ioctl(conn->sock, FIONREAD, &count);
+  if(!tun->callbacks.custom_forward) {
+    // Since we cannot determine server message bounds, we assume that
+    // message ends when no more data is available in the socket buffer.
+    int count = 0;
+    ioctl(conn->sock, FIONREAD, &count);
 
-  if(count == 0)
-    flags |= TH_PUSH;
+    if(count == 0)
+      flags |= TH_PUSH;
+  }
 #endif
 
   // NAT back the TCP port and reconstruct the TCP header
@@ -1801,19 +1806,38 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   return 0;
 }
 
-/* ******************************************************* */
-
-static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
+static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   int iphdr_len = zdtun_iphdr_len(tun, conn);
-  char *payload_ptr = tun->reply_buf + iphdr_len + sizeof(struct udphdr);
-  int l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE-iphdr_len-sizeof(struct udphdr), 0);
+  char *payload_ptr = tun->reply_buf + iphdr_len + TCP_HEADER_LEN;
+  int to_recv = min(conn->tcp.window_size, conn->tcp.mss);
+  int l4_len = recv(conn->sock, payload_ptr, to_recv, 0);
 
-  if(l4_len == SOCKET_ERROR) {
-    close_with_socket_error(tun, conn, "UDP recv");
+  if(l4_len == SOCKET_ERROR)
+    return close_with_socket_error(tun, conn, "TCP recv");
+
+  return handle_tcp_reply_2(tun, conn, payload_ptr, l4_len);
+}
+
+int zdtun_handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn, const char* payload, int l4_len) {
+  int iphdr_len = zdtun_iphdr_len(tun, conn);
+  int offset = iphdr_len + TCP_HEADER_LEN;
+
+  if(offset + l4_len >= REPLY_BUF_SIZE) {
+    error("zdtun_handle_tcp_reply: packet too big (%d B)", l4_len);
     return -1;
   }
 
+  char *payload_ptr = tun->reply_buf + offset;
+
+  memcpy(payload_ptr, payload, l4_len);
+  return handle_tcp_reply_2(tun, conn, payload_ptr, l4_len);
+}
+
+/* ******************************************************* */
+
+static int handle_udp_reply_2(zdtun_t *tun, zdtun_conn_t *conn, char* payload_ptr, int l4_len) {
   // Reconstruct the UDP header
+  int iphdr_len = zdtun_iphdr_len(tun, conn);
   int l3_len = l4_len + sizeof(struct udphdr);
   struct udphdr *data = (struct udphdr*) (tun->reply_buf + iphdr_len);
   data->uh_ulen = htons(l3_len);
@@ -1839,6 +1863,34 @@ static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   }
 
   return rv;
+}
+
+static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
+  int iphdr_len = zdtun_iphdr_len(tun, conn);
+  char *payload_ptr = tun->reply_buf + iphdr_len + sizeof(struct udphdr);
+  int l4_len = recv(conn->sock, payload_ptr, REPLY_BUF_SIZE-iphdr_len-sizeof(struct udphdr), 0);
+
+  if(l4_len == SOCKET_ERROR) {
+    close_with_socket_error(tun, conn, "UDP recv");
+    return -1;
+  }
+
+  return handle_udp_reply_2(tun, conn, payload_ptr, l4_len);
+}
+
+int zdtun_handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn, const char* payload, int l4_len) {
+  int iphdr_len = zdtun_iphdr_len(tun, conn);
+  int offset = iphdr_len + sizeof(struct udphdr);
+
+  if(offset + l4_len >= REPLY_BUF_SIZE) {
+    error("zdtun_handle_udp_reply: packet too big (%d B)", l4_len);
+    return -1;
+  }
+
+  char *payload_ptr = tun->reply_buf + offset;
+
+  memcpy(payload_ptr, payload, l4_len);
+  return handle_udp_reply_2(tun, conn, payload_ptr, l4_len);
 }
 
 /* ******************************************************* */
@@ -1908,14 +1960,24 @@ static int handle_queued_tcp_data(zdtun_t *tun, zdtun_conn_t *conn) {
     FD_CLR(conn->sock, &tun->write_fds);
 
   if(sent > 0) {
-    // ACK the sent packets
-    conn->tcp.client_seq += sent;
+    zdtun_tcp_client_ack(tun, conn, sent);
     conn->tcp.tx_queue_size -= sent;
-    build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
-
-    if(send_to_client(tun, conn, TCP_HEADER_LEN) < 0)
-      return -1;
   }
+
+  return 0;
+}
+
+/* ******************************************************* */
+
+int zdtun_tcp_client_ack(zdtun_t *tun, zdtun_conn_t *conn, int num_bytes) {
+  if((num_bytes <= 0) || (conn->tuple.ipproto != IPPROTO_TCP))
+    return 0;
+
+  conn->tcp.client_seq += num_bytes;
+  build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
+
+  if(send_to_client(tun, conn, TCP_HEADER_LEN) < 0)
+    return -1;
 
   return 0;
 }
