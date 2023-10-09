@@ -1,50 +1,32 @@
-# Zero Dep Tunnel
+# zdtun
 
-Zero Dep Tunnel is a C library to integrate VPN like functionalities on existing
-programs without installing third-party software or drivers on the target device.
+zdtun (short for "Zero Dependency Tunnel") is a C library which provides an API to integrate VPN like functionalities on existing programs without installing third-party software or drivers on the target device.
 
-## Motivation
+This library is used in [PCAPdroid](https://github.com/emanuele-f/PCAPdroid) to capture network packets on Android without root.
 
-Tunneling traffic through Windows can be tricky:
-  - TUN/TAP interfaces require a specific driver
-  - RAW sockets cannot enstablish TCP/UDP connections for security reasons
-  - Using libpcap-like functionalities requires installing WinPcap
-
-Existing solutions are complex and not appropriate to be integrated as a library
-into an existing program.
+The library implements parts of a TCP/IP stack, for example the tracking of sessions and handling of TCP sequence numbers and window size.
+However, zdtun *does not* implement any TCP retransmission logic, as this feature is already provided by the TCP sockets used internally.
 
 ## Features
 
-Zero Dep Tunnel offers the following features:
+zdtun offers the following features:
 
-  - Tunnel TCP, UDP and ICMP (echo) connections via a pivot host towards a private network
-  - Works on both Windows and Linux
-  - Easy integration: just a static library, a header file, and no dependencies
-  - No special interface / promisc mode is used, only the sockets API
-  - Supports running some nmap scans through the tunnel
-  - Supports internet traffic tunneling via a default gateway on the pivot host network
-
-## Naming and Assumptions
-
-Some naming conventions:
-  - Client host: the host which is willing to reach the remote private network
-  - Pivot host: the host which has direct access to the private network
-  - Target host: an host which is located into the private pivot host network
-
-Assumptions:
-  - Zero Dep Tunnel requires an enstablished TCP-like connection between the client host
-    and the pivot host. It won't work on a UDP connection.
-  - The client host is a Linux pc with TUN interface support.
+  - Simple API to integrate into existing programs
+  - Supports Windows, Linux and Android
+  - Support UDP, TCP, ICMP and IPv4/IPv6
+  - Just one header file, no additional dependencies
+  - No special interface / promisc mode is used, only standard sockets
+  - Generic API to parse TCP/IP packets into a `zdtun_pkt`
 
 ## Sample Integration
 
-Here is how to use the zdtun api to integrate its VPN capabilities into an existing program and turn it into a zdtun pivot:
+Here is how to use the zdtun api to integrate its VPN capabilities into an existing program:
 
 ```c
 #include "zdtun.h"
 
 /* This is called when zdtun needs to send data to the client */
-int send_pivot_callback(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *conn_info) {
+int send_client_callback(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *conn_info) {
   int cli_socket = *((int*) zdtun_userdata(tun));
 
   send(cli_socket, pkt->buf, pkt->len, 0);
@@ -54,9 +36,12 @@ int main() {
   /* A TCP socket connected to the client */
   socket_t cli_socket = ...;
   zdtun_callbacks_t callbacks = {
-    .send_client = send_pivot_callback,
+    .send_client = send_client_callback,
   };
   ...
+
+  // ignore SIGPIPE, which can occur while sending data
+  signal(SIGPIPE, SIG_IGN);
 
   zdtun_t *tun = zdtun_init(&callbacks, &cli_socket);
 
@@ -89,62 +74,7 @@ int main() {
 }
 ```
 
-See `zdtun_pivot.c` for a complete example.
-
-NOTE: when running the pivot on linux, it's necessary to mask/handle the *SIGPIPE*
-signal, which can occur while sending data.
-
-## Build
-
-Cross platform build is provided by cmake.
-
-Preparation:
-  - `mkdir Build`
-  - `cd Build`
-  - `cmake ..` (or `cmake -G "Visual Studio 15 Win64" ..` for a Windows x64 build)
-
-Build the zdtun library and the sample pivot program:
-  - on Linux:
-
-    `make zdtun_pivot`
-
-  - on Windows:
-
-    `MSBuild zdtun_pivot.vcxproj /t:Build /p:Configuration=Release`
-
-    `MSBuild zdtun.vcxproj /t:Build /p:Configuration=Release`
-
-  The output is `Release\zdtun_pivot.exe`.
-
-Build the sample client program (Linux only):
-  - `make zdtun_client`
-
-See `zdtun.h` for the zdtun API documentation.
-
-## Run Examples
-
-The client and pivot programs provide an example of zdtun integration and usage.
-In this example, the client has a public IP `1.2.3.4` and is willing to reach the
-`192.168.30.0/24` network, which is located on the pivot host side.
-The pivot host is under NAT, so it will be the initiator of the connection.
-
-On the Linux client host, start the listening program:
-
-  `./zdtun_client -l 5050 192.168.30.0 255.255.255.0`
-
-A new tun interface will be created.
-
-On the Windows pivot host, start the connection to the client host:
-
-  `zdtun_server.exe 1.2.3.4 5050`
-
-The client host should be now able to ping and connect to the `192.168.30.0/24`
-network.
-
-NOTE: the sample programs are *not* intended to be used in production as they
-are not "secure". They just show how to integrate the zdtun API to
-communicate over an existing channel. It's your job to provide and secure such
-a channel.
+See `zdtun_gateway.c` for a complete example.
 
 ## Run Local Gateway
 
@@ -152,25 +82,24 @@ The `zdtun_gateway` is a program which routes all the local/internet connections
 through zdtun via a TUN device. It can be useful to easily test the zdtun
 functionalities locally.
 
-## How It Works
 
-The pivot host running Zero Dep Tunnel keeps track of the client connections and opens sockets on demand toward the private network.
+## Motivation
 
-When the client initiates a connection, the pivot creates a new socket towards
-the target host. It proxies subsequent packets from the client to the target and
-viceversa by reconstructing network headers which have been stripped by the sockets.
+The library was initially developed for Windows, as a way to provide VPN-like feature into an existing program, and later extended for the linux/Android world.
 
-In order to proxy the TCP packets coming from the target host back to the client
-host, the pivot keeps track of the TCP sequence/ack numbers and behaves like a
-TCP application. Since Zero Dep Tunnel is running (see Assumptions above) on a
-reliable transport, there is no need to implement full TCP protocol, but only a
-minimal communication.
+Tunneling traffic through Windows can be tricky:
+  - TUN/TAP interfaces require a specific driver
+  - RAW sockets cannot enstablish TCP/UDP connections for security reasons
+  - Using libpcap-like functionalities requires installing WinPcap
+
+Existing solutions are complex and not appropriate to be integrated as a library
+into an existing program.
 
 ## See Also
 
 - zdtun used on Android to capture packets: https://github.com/emanuele-f/PCAPdroid
+- Reverse tethering on Android devices, employing a similar tecnique: https://github.com/Genymobile/gnirehtet/blob/master/DEVELOP.md
+- Android firewall app, employing a similar tecnique: https://github.com/m66b/NetGuard
 - RAW sockets for pivoting, no Windows support, no API: https://github.com/0x36/VPNPivot
 - https://docs.microsoft.com/en-us/windows/desktop/winsock/maximum-number-of-sockets-supported-2
 - http://tangentsoft.net/wskfaq/advanced.html#maxsockets
-- Reverse tethering on Android devices, employing a similar tecnique: https://github.com/Genymobile/gnirehtet/blob/master/DEVELOP.md
-- Proxy-like implementation for an Android firewall: https://github.com/m66b/NetGuard
