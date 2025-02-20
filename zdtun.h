@@ -512,6 +512,7 @@ void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t stat
 const zdtun_5tuple_t* zdtun_conn_get_5tuple(const zdtun_conn_t *conn);
 time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn);
 zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn);
+int zdtun_conn_get_error(const zdtun_conn_t *conn);
 socket_t zdtun_conn_get_socket(const zdtun_conn_t *conn);
 char* zdtun_5tuple2str(const zdtun_5tuple_t *tuple, char *buf, size_t bufsize);
 

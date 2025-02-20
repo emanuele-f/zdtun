@@ -100,6 +100,7 @@ typedef struct zdtun_conn {
   time_t tstamp;
   socket_t sock;
   zdtun_conn_status_t status;
+  int error;
 
   proxy_t *dnat;
   proxy_mode_t proxy_mode;
@@ -324,6 +325,7 @@ static int close_with_socket_error(zdtun_t *tun, zdtun_conn_t *conn, const char 
     error("%s error[%d]: %s - %s", ctx, socket_errno, strerror(socket_errno), buf);
   }
 
+  conn->error = socket_errno;
   zdtun_conn_close(tun, conn, status);
   return(rv);
 }
@@ -388,6 +390,10 @@ time_t zdtun_conn_get_last_seen(const zdtun_conn_t *conn) {
 zdtun_conn_status_t zdtun_conn_get_status(const zdtun_conn_t *conn) {
   return conn->status;
 }
+int zdtun_conn_get_error(const zdtun_conn_t *conn) {
+  return conn->error;
+}
+
 
 socket_t zdtun_conn_get_socket(const zdtun_conn_t *conn) {
   return conn->sock;
