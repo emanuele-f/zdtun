@@ -54,7 +54,7 @@
 static void destroy_conn(zdtun_t *tun, zdtun_conn_t *conn);
 
 #define default_mss(tun, conn) (tun->mtu - sizeof(struct tcphdr) -\
-      ((sock_ipver(tun, conn) == 4) ? sizeof(struct iphdr) : sizeof(struct ipv6_hdr)))
+      ((conn->tuple.ipver == 4) ? sizeof(struct iphdr) : sizeof(struct ipv6_hdr)))
 
 /* ******************************************************* */
 
@@ -527,13 +527,15 @@ static int get_available_sndbuf(zdtun_conn_t *conn) {
 /* ******************************************************* */
 
 int zdtun_iphdr_len(zdtun_t *tun, zdtun_conn_t *conn) {
-  return (sock_ipver(tun, conn) == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
+  // NOTE: the reply goes back to the client, so it must use the connection
+  // address family, which may differ from the proxy/socket one (sock_ipver)
+  return (conn->tuple.ipver == 4) ? IPV4_HEADER_LEN : IPV6_HEADER_LEN;
 }
 
 /* ******************************************************* */
 
 void zdtun_make_iphdr(zdtun_t *tun, zdtun_conn_t *conn, char *pkt_buf, u_int16_t l3_len) {
-  if(sock_ipver(tun, conn) == 4) {
+  if(conn->tuple.ipver == 4) {
     struct iphdr *ip = (struct iphdr*)pkt_buf;
     uint16_t tot_len = l3_len + IPV4_HEADER_LEN;
 
@@ -564,7 +566,7 @@ void zdtun_make_iphdr(zdtun_t *tun, zdtun_conn_t *conn, char *pkt_buf, u_int16_t
 /* ******************************************************* */
 
 uint16_t zdtun_l3_checksum(zdtun_t *tun, zdtun_conn_t *conn, char *ipbuf, char *l3, uint16_t l3_len) {
-  uint8_t ipver = sock_ipver(tun, conn);
+  uint8_t ipver = conn->tuple.ipver;
   uint8_t ipproto = conn->tuple.ipproto;
   uint16_t rv = calc_checksum(0, (uint8_t*)l3, l3_len);
 
@@ -598,7 +600,6 @@ uint16_t zdtun_l3_checksum(zdtun_t *tun, zdtun_conn_t *conn, char *ipbuf, char *
 
 static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
         u_int16_t l4_len, u_int16_t optsoff) {
-  uint8_t ipver = sock_ipver(tun, conn);
   int iphdr_len = zdtun_iphdr_len(tun, conn);
   const u_int16_t l3_len = l4_len + TCP_HEADER_LEN + (optsoff * 4);
   struct tcphdr *tcp = (struct tcphdr *)&tun->reply_buf[iphdr_len];
@@ -1709,7 +1710,7 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
   conn->tstamp = zdtun_now(tun);
 
-  uint8_t ipver = sock_ipver(tun, conn);
+  uint8_t ipver = conn->tuple.ipver;
 
   data->checksum = 0;
   if(ipver == 4)
@@ -1832,7 +1833,7 @@ static int handle_udp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
   // UDP checksum mandatory only for IPv6. Keep it 0 for IPv4 to speed up things.
   data->uh_sum = 0;
-  if(sock_ipver(tun, conn) != 4)
+  if(conn->tuple.ipver != 4)
     data->uh_sum = zdtun_l3_checksum(tun, conn, tun->reply_buf, (char*)data, l3_len);
 
   int rv = send_to_client(tun, conn, l3_len);
