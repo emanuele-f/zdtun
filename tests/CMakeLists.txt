@@ -64,3 +64,18 @@ set(TCP_CLOSE_TESTS
 foreach(TEST_NAME ${TCP_CLOSE_TESTS})
   add_test(NAME tcp_close_${TEST_NAME} COMMAND tcp_close ${TEST_NAME})
 endforeach()
+
+add_executable(stack stack.c ../zdtun.c ../utils.c)
+target_include_directories(stack PRIVATE ..)
+add_dependencies(run_tests stack)
+
+set(STACK_TESTS
+  large_mss_clamped_to_mtu
+  mss_clamped_to_configured_mtu
+  small_mss_honored
+  zero_mss_ignored
+)
+
+foreach(TEST_NAME ${STACK_TESTS})
+  add_test(NAME stack_${TEST_NAME} COMMAND stack ${TEST_NAME})
+endforeach()

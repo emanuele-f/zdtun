@@ -1278,8 +1278,14 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       if((kind == 0) || (len < 2) || (optslen < len))
         break;
 
-      if((kind == 2) && (len == 4)) // MSS
-        mss = ntohs(*(uint16_t*)opts);
+      if((kind == 2) && (len == 4)) { // MSS
+        uint16_t client_mss = ntohs(*(uint16_t*)opts);
+
+        // The replies must fit the MTU and reply_buf. With a 0 MSS, the recv
+        // would return 0, which means that the server has closed
+        if((client_mss > 0) && (client_mss < mss))
+          mss = client_mss;
+      }
 
       if((kind == 3) && (len == 3)) // Window Scale
         scale = *opts;
