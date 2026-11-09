@@ -289,6 +289,14 @@ static void close_server_socket(test_ctx_t *ctx) {
 
 /* ******************************************************* */
 
+static void server_close_while_queued(test_ctx_t *ctx) {
+  send_eagain_count = NUM_EAGAIN_FOREVER;
+  client_send(ctx, TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+  close_server_socket(ctx);
+}
+
+/* ******************************************************* */
+
 static void server_eof_while_queued(test_ctx_t *ctx) {
   send_eagain_count = NUM_EAGAIN_FOREVER;
   client_send(ctx, TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
@@ -850,6 +858,73 @@ static void test_fin_payload_acked_when_server_closed() {
 
 /* ******************************************************* */
 
+static void test_queued_upload_acked_when_server_closes() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  server_close_while_queued(&ctx);
+
+  assert(ctx.num_server_fins == 1);
+  assert(ctx.last_ack == ctx.client_seq);
+  assert(ctx.num_closed == 0);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_partially_sent_upload_acked_when_server_closes() {
+  test_ctx_t ctx;
+  char buf[PARTIAL_SEND_SIZE];
+  test_setup(&ctx);
+
+  send_max_bytes = PARTIAL_SEND_SIZE;
+  client_send(&ctx, TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  // Unread data would turn the server close into a RST
+  assert(server_read(&ctx, buf, sizeof(buf)) == sizeof(buf));
+
+  send_eagain_count = NUM_EAGAIN_FOREVER;
+  close_server_socket(&ctx);
+
+  assert(ctx.last_ack == ctx.client_seq);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_fin_acked_after_server_close_with_queued_upload() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  server_close_while_queued(&ctx);
+  client_send(&ctx, TH_FIN | TH_ACK, NULL, 0);
+
+  assert(ctx.last_ack == ctx.client_seq);
+  assert(ctx.num_closed == 1);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_data_acked_after_server_close_with_queued_upload() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  server_close_while_queued(&ctx);
+  client_send(&ctx, TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+
+  assert(ctx.last_ack == ctx.client_seq);
+  assert(ctx.num_closed == 0);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 typedef struct {
   const char *name;
   void (*run)();
@@ -884,6 +959,10 @@ static const test_t tests[] = {
   {"queued_upload_not_sent_after_server_close", test_queued_upload_not_sent_after_server_close},
   {"fin_terminates_when_server_closed", test_fin_terminates_when_server_closed},
   {"fin_payload_acked_when_server_closed", test_fin_payload_acked_when_server_closed},
+  {"queued_upload_acked_when_server_closes", test_queued_upload_acked_when_server_closes},
+  {"partially_sent_upload_acked_when_server_closes", test_partially_sent_upload_acked_when_server_closes},
+  {"fin_acked_after_server_close_with_queued_upload", test_fin_acked_after_server_close_with_queued_upload},
+  {"data_acked_after_server_close_with_queued_upload", test_data_acked_after_server_close_with_queued_upload},
 };
 
 /* ******************************************************* */

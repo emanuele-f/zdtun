@@ -632,6 +632,20 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
 
 /* ******************************************************* */
 
+static void free_tx_queue(zdtun_conn_t *conn) {
+  tcp_data_t *cur = conn->tcp.tx_queue;
+
+  while(cur) {
+    tcp_data_t *next = cur->next;
+    free(cur);
+    cur = next;
+  }
+
+  conn->tcp.tx_queue = NULL;
+}
+
+/* ******************************************************* */
+
 // It is used to defer the destroy_conn function to let the user
 // consume the connection without accessing invalid memory. The connections
 // will be (later) destroyed by zdtun_purge_expired.
@@ -662,18 +676,8 @@ void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t stat
     send_to_client(tun, conn, TCP_HEADER_LEN);
   }
 
-  if(conn->tuple.ipproto == IPPROTO_TCP) {
-    tcp_data_t *cur = conn->tcp.tx_queue;
-
-    // free tx_queue
-    while(cur) {
-      tcp_data_t *next = cur->next;
-      free(cur);
-      cur = next;
-    }
-
-    conn->tcp.tx_queue = NULL;
-  }
+  if(conn->tuple.ipproto == IPPROTO_TCP)
+    free_tx_queue(conn);
 
   conn->status = (status >= CONN_STATUS_CLOSED) ? status : CONN_STATUS_CLOSED;
 
@@ -1768,6 +1772,14 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
     return close_with_socket_error(tun, conn, "TCP recv");
   else if(l4_len == 0) {
     debug("Server socket closed");
+
+    if(!conn->tcp.client_closed) {
+      // The socket is closed below, so the queued data can no longer be
+      // delivered. ACK it, like the data received after the close
+      conn->tcp.client_seq += conn->tcp.tx_queue_size;
+      conn->tcp.tx_queue_size = 0;
+      free_tx_queue(conn);
+    }
 
     if(!conn->tcp.fin_ack_sent) {
       tcp_socket_fin_ack(tun, conn);
