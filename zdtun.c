@@ -1174,6 +1174,31 @@ static int finish_client_close(zdtun_t *tun, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
+// Received ACK from the client, update the window. Take into account
+// the in flight bytes which the client has not ACK-ed yet.
+static void update_tcp_window(zdtun_t *tun, zdtun_conn_t *conn, const struct tcphdr *data) {
+  uint32_t ack_num = ntohl(data->th_ack);
+  uint32_t in_flight;
+
+  if(conn->tcp.zdtun_seq >= ack_num)
+    in_flight = conn->tcp.zdtun_seq - ack_num;
+  else
+    // TCP seq wrapped
+    in_flight = 0xFFFFFFFF - ack_num + conn->tcp.zdtun_seq + 1;
+
+  uint32_t window = ntohs(data->th_win) << conn->tcp.window_scale;
+  conn->tcp.window_size = window - in_flight;
+
+  if(!FD_ISSET(conn->sock, &tun->all_fds) && (conn->tcp.window_size > 0) && !conn->tcp.fin_ack_sent) {
+    log_tcp_window("[%d][Window size: %u] enabling socket", conn->tuple.src_port, conn->tcp.window_size);
+
+    // make the socket selectable again
+    FD_SET(conn->sock, &tun->all_fds);
+  }
+}
+
+/* ******************************************************* */
+
 // returns 0 on success
 // returns <0 on error
 // no_ack: can be used to avoid sending the ACK to the client and keep
@@ -1328,6 +1353,9 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   } else if((data->th_flags & (TH_FIN | TH_ACK)) == (TH_FIN | TH_ACK)) {
     debug("Got TCP FIN+ACK from client");
 
+    if(conn->sock != INVALID_SOCKET)
+      update_tcp_window(tun, conn, data);
+
     if(conn->tcp.client_closed) {
       // FIN retransmission
       build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
@@ -1363,28 +1391,8 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
       if(send_to_client(tun, conn, TCP_HEADER_LEN) != 0)
         return -1;
-    } else {
-      // Received ACK from the client, update the window. Take into account
-      // the in flight bytes which the client has not ACK-ed yet.
-      uint32_t ack_num = ntohl(data->th_ack);
-      uint32_t in_flight;
-
-      if(conn->tcp.zdtun_seq >= ack_num)
-        in_flight = conn->tcp.zdtun_seq - ack_num;
-      else
-        // TCP seq wrapped
-        in_flight = 0xFFFFFFFF - ack_num + conn->tcp.zdtun_seq + 1;
-
-      uint32_t window = ntohs(data->th_win) << conn->tcp.window_scale;
-      conn->tcp.window_size = window - in_flight;
-
-      if(!FD_ISSET(conn->sock, &tun->all_fds) && (conn->tcp.window_size > 0) && !conn->tcp.fin_ack_sent) {
-        log_tcp_window("[%d][Window size: %u] enabling socket", conn->tuple.src_port, conn->tcp.window_size);
-
-        // make the socket selectable again
-        FD_SET(conn->sock, &tun->all_fds);
-      }
-    }
+    } else
+      update_tcp_window(tun, conn, data);
   }
 
   // check for payload data (avoid sending ACK to an ACK)

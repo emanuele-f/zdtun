@@ -333,6 +333,19 @@ static void server_send_payload(test_ctx_t *ctx) {
 
 /* ******************************************************* */
 
+static void server_exhausts_client_window(test_ctx_t *ctx) {
+  ctx->client_window = PAYLOAD_SIZE;
+  client_send(ctx, TH_ACK, NULL, 0);
+
+  server_send_payload(ctx);
+  server_send_payload(ctx);
+  process_events(ctx);
+
+  assert(!zdtun_polls_reads(ctx));
+}
+
+/* ******************************************************* */
+
 static int server_read(test_ctx_t *ctx, char *buf, int size) {
   int total = 0;
 
@@ -925,6 +938,67 @@ static void test_data_acked_after_server_close_with_queued_upload() {
 
 /* ******************************************************* */
 
+static void test_window_update_applied_by_fin() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  server_exhausts_client_window(&ctx);
+
+  ctx.server_seq += PAYLOAD_SIZE;
+  ctx.client_window = CLIENT_WINDOW;
+  client_send(&ctx, TH_FIN | TH_ACK, NULL, 0);
+
+  assert(zdtun_polls_reads(&ctx));
+
+  ctx.num_replies = 0;
+  process_events(&ctx);
+
+  assert(ctx.num_replies == 1);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_window_update_applied_by_fin_retransmission() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  server_exhausts_client_window(&ctx);
+  client_send(&ctx, TH_FIN | TH_ACK, NULL, 0);
+
+  assert(!zdtun_polls_reads(&ctx));
+
+  ctx.server_seq += PAYLOAD_SIZE;
+  ctx.client_window = CLIENT_WINDOW;
+  client_retransmit_fin(&ctx);
+
+  assert(zdtun_polls_reads(&ctx));
+
+  ctx.num_replies = 0;
+  process_events(&ctx);
+
+  assert(ctx.num_replies == 1);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_server_eof_not_polled_after_fin_retransmission() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  server_eof_while_queued(&ctx);
+  client_retransmit_fin(&ctx);
+
+  assert(!zdtun_polls_reads(&ctx));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 typedef struct {
   const char *name;
   void (*run)();
@@ -963,6 +1037,9 @@ static const test_t tests[] = {
   {"partially_sent_upload_acked_when_server_closes", test_partially_sent_upload_acked_when_server_closes},
   {"fin_acked_after_server_close_with_queued_upload", test_fin_acked_after_server_close_with_queued_upload},
   {"data_acked_after_server_close_with_queued_upload", test_data_acked_after_server_close_with_queued_upload},
+  {"window_update_applied_by_fin", test_window_update_applied_by_fin},
+  {"window_update_applied_by_fin_retransmission", test_window_update_applied_by_fin_retransmission},
+  {"server_eof_not_polled_after_fin_retransmission", test_server_eof_not_polled_after_fin_retransmission},
 };
 
 /* ******************************************************* */

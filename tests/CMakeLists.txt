@@ -52,6 +52,9 @@ set(TCP_CLOSE_TESTS
   partially_sent_upload_acked_when_server_closes
   fin_acked_after_server_close_with_queued_upload
   data_acked_after_server_close_with_queued_upload
+  window_update_applied_by_fin
+  window_update_applied_by_fin_retransmission
+  server_eof_not_polled_after_fin_retransmission
 )
 
 foreach(TEST_NAME ${TCP_CLOSE_TESTS})
