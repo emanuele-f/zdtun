@@ -751,6 +751,75 @@ static void test_send_error_after_server_eof_closes() {
 
 /* ******************************************************* */
 
+static void test_upload_sent_while_server_sending() {
+  test_ctx_t ctx;
+  char received[PAYLOAD_SIZE];
+  test_setup(&ctx);
+
+  client_send(&ctx, TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+  server_send_payload(&ctx);
+  process_events(&ctx);
+
+  assert(ctx.last_ack == ctx.client_seq);
+  assert(server_read(&ctx, received, sizeof(received)) == PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_close_completed_while_server_sending() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  client_send(&ctx, TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+  client_send(&ctx, TH_FIN | TH_ACK, NULL, 0);
+  server_send_payload(&ctx);
+  process_events(&ctx);
+
+  assert(shutdown_calls == 1);
+  assert(ctx.last_ack == ctx.client_seq);
+  assert(server_received_payload(&ctx));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_drain_completed_with_server_eof() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  client_send(&ctx, TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+  client_send(&ctx, TH_FIN | TH_ACK, NULL, 0);
+  assert(__real_shutdown(ctx.server_sock, SHUT_WR) == 0);
+  process_events(&ctx);
+
+  assert(ctx.num_closed == 1);
+  assert(ctx.last_ack == ctx.client_seq);
+  assert(server_received_payload(&ctx));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// The socket is both readable and writable, but is closed by the read
+static void test_queued_upload_not_sent_after_server_close() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  client_send(&ctx, TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+  close_server_socket(&ctx);
+
+  assert(ctx.num_server_fins == 1);
+  assert(ctx.num_closed == 0);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 static void test_fin_terminates_when_server_closed() {
   test_ctx_t ctx;
   test_setup(&ctx);
@@ -809,6 +878,10 @@ static const test_t tests[] = {
   {"server_eof_not_polled_after_window_update", test_server_eof_not_polled_after_window_update},
   {"server_fin_sent_once_while_queued", test_server_fin_sent_once_while_queued},
   {"send_error_after_server_eof_closes", test_send_error_after_server_eof_closes},
+  {"upload_sent_while_server_sending", test_upload_sent_while_server_sending},
+  {"close_completed_while_server_sending", test_close_completed_while_server_sending},
+  {"drain_completed_with_server_eof", test_drain_completed_with_server_eof},
+  {"queued_upload_not_sent_after_server_close", test_queued_upload_not_sent_after_server_close},
   {"fin_terminates_when_server_closed", test_fin_terminates_when_server_closed},
   {"fin_payload_acked_when_server_closed", test_fin_payload_acked_when_server_closed},
 };

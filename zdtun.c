@@ -1990,6 +1990,11 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
         rv = handle_icmp_reply(tun, conn);
       else
         error("Unhandled socket.rd proto: %d", ipproto);
+
+      // A server which keeps sending would otherwise starve the upload
+      if((rv == 0) && (ipproto == IPPROTO_TCP) && (conn->sock != INVALID_SOCKET)
+          && conn->tcp.tx_queue && FD_ISSET(conn->sock, wr_fds))
+        rv = handle_queued_tcp_data(tun, conn);
     } else if(FD_ISSET(conn->sock, wr_fds)) {
       if(ipproto == IPPROTO_TCP) {
         if(conn->tcp.tx_queue)

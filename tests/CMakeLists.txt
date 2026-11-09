@@ -42,6 +42,10 @@ set(TCP_CLOSE_TESTS
   server_eof_not_polled_after_window_update
   server_fin_sent_once_while_queued
   send_error_after_server_eof_closes
+  upload_sent_while_server_sending
+  close_completed_while_server_sending
+  drain_completed_with_server_eof
+  queued_upload_not_sent_after_server_close
   fin_terminates_when_server_closed
   fin_payload_acked_when_server_closed
 )
