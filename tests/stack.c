@@ -349,6 +349,96 @@ static void test_zero_mss_ignored() {
 
 /* ******************************************************* */
 
+// The buffer has the exact size of the headers, for ASan to detect reads past the packet
+static char* alloc_syn(test_ctx_t *ctx, uint8_t ihl, uint8_t th_off) {
+  char *buf = calloc(1, IPV4_TCP_HEADERS_LEN);
+  assert(buf != NULL);
+
+  struct iphdr *ip = (struct iphdr*) buf;
+  struct tcphdr *tcp = (struct tcphdr*) (buf + sizeof(struct iphdr));
+
+  ip->version = 4;
+  ip->ihl = ihl;
+  ip->tot_len = htons(IPV4_TCP_HEADERS_LEN);
+  ip->ttl = 64;
+  ip->protocol = IPPROTO_TCP;
+  ip->saddr = inet_addr(CLIENT_IP);
+  ip->daddr = inet_addr(SERVER_IP);
+
+  tcp->th_sport = htons(CLIENT_PORT);
+  tcp->th_dport = htons(ctx->server_port);
+  tcp->th_seq = htonl(CLIENT_ISN);
+  tcp->th_off = th_off;
+  tcp->th_flags = TH_SYN;
+  tcp->th_win = htons(CLIENT_WINDOW);
+
+  return buf;
+}
+
+/* ******************************************************* */
+
+static int parse_syn(test_ctx_t *ctx, uint8_t ihl, uint8_t th_off) {
+  char *buf = alloc_syn(ctx, ihl, th_off);
+  zdtun_pkt_t pkt;
+  int rv = zdtun_parse_pkt(ctx->tun, buf, IPV4_TCP_HEADERS_LEN, &pkt);
+
+  free(buf);
+  return rv;
+}
+
+/* ******************************************************* */
+
+static void test_finalize_unconnected(test_ctx_t *ctx) {
+  zdtun_finalize(ctx->tun);
+  close(ctx->listen_sock);
+}
+
+/* ******************************************************* */
+
+static void test_short_tcp_data_offset_rejected() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  for(uint8_t th_off = 0; th_off < 5; th_off++)
+    assert(parse_syn(&ctx, 5, th_off) == -1);
+
+  assert(parse_syn(&ctx, 5, 5) == 0);
+
+  test_finalize_unconnected(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_short_ipv4_ihl_rejected() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  for(uint8_t ihl = 0; ihl < 5; ihl++)
+    assert(parse_syn(&ctx, ihl, 5) == -1);
+
+  assert(parse_syn(&ctx, 5, 5) == 0);
+
+  test_finalize_unconnected(&ctx);
+}
+
+/* ******************************************************* */
+
+// The options length would underflow, reading the options past the end of the packet
+static void test_syn_short_data_offset_not_forwarded() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  char *buf = alloc_syn(&ctx, 5, 0);
+
+  assert(zdtun_easy_forward(ctx.tun, buf, IPV4_TCP_HEADERS_LEN) == NULL);
+  assert(!ctx.syn_ack_received);
+
+  free(buf);
+  test_finalize_unconnected(&ctx);
+}
+
+/* ******************************************************* */
+
 typedef struct {
   const char *name;
   void (*run)();
@@ -359,6 +449,9 @@ static const test_t tests[] = {
   {"mss_clamped_to_configured_mtu", test_mss_clamped_to_configured_mtu},
   {"small_mss_honored", test_small_mss_honored},
   {"zero_mss_ignored", test_zero_mss_ignored},
+  {"short_tcp_data_offset_rejected", test_short_tcp_data_offset_rejected},
+  {"short_ipv4_ihl_rejected", test_short_ipv4_ihl_rejected},
+  {"syn_short_data_offset_not_forwarded", test_syn_short_data_offset_not_forwarded},
 };
 
 /* ******************************************************* */

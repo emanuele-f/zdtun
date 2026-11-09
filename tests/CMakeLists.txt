@@ -74,6 +74,9 @@ set(STACK_TESTS
   mss_clamped_to_configured_mtu
   small_mss_honored
   zero_mss_ignored
+  short_tcp_data_offset_rejected
+  short_ipv4_ihl_rejected
+  syn_short_data_offset_not_forwarded
 )
 
 foreach(TEST_NAME ${STACK_TESTS})

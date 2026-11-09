@@ -905,6 +905,11 @@ int zdtun_parse_pkt(zdtun_t *tun, const char *_pkt_buf, uint16_t pkt_len, zdtun_
     struct iphdr *ip_header = (struct iphdr*) pkt_buf;
     iphdr_len = ip_header->ihl * 4;
 
+    if(iphdr_len < IPV4_HEADER_LEN) {
+      debug("Invalid IPv4 header length: %d", iphdr_len);
+      return -1;
+    }
+
     if(pkt_len < iphdr_len) {
       debug("IPv4 packet too short: %d bytes", pkt_len);
       return -1;
@@ -992,7 +997,7 @@ int zdtun_parse_pkt(zdtun_t *tun, const char *_pkt_buf, uint16_t pkt_len, zdtun_
 
     tcp_header_len = data->th_off * 4;
 
-    if(pkt_len < (iphdr_len + tcp_header_len)) {
+    if((tcp_header_len < TCP_HEADER_LEN) || (pkt_len < (iphdr_len + tcp_header_len))) {
       debug("Malformed TCP packet");
       return -1;
     }
