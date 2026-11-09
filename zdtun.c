@@ -2,7 +2,7 @@
  * Zero Dep Tunnel: VPN library without dependencies
  * ----------------------------------------------------------------------------
  *
- * Copyright (C) 2018-22 - Emanuele Faranda
+ * Copyright (C) 2018-26 - Emanuele Faranda
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -1146,6 +1146,30 @@ static int enqueue_tcp_data(zdtun_t *tun, zdtun_conn_t *conn, const char *buf, i
 
 /* ******************************************************* */
 
+// Must only be called once the client data has been written to the socket,
+// since any send after the shutdown fails with EPIPE.
+static int finish_client_close(zdtun_t *tun, zdtun_conn_t *conn) {
+  int rv;
+
+  // Half close the socket to possibly signal the remote server
+  // (e.g. after an HTTP request is completed).
+  if((conn->sock != INVALID_SOCKET) && (shutdown(conn->sock, SHUT_WR) != 0))
+    debug("shutdown failed[%d] %s", errno, strerror(errno));
+
+  conn->tcp.client_seq += 1;
+
+  build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
+  rv = send_to_client(tun, conn, TCP_HEADER_LEN);
+
+  if((conn->sock == INVALID_SOCKET) || conn->tcp.fin_ack_sent)
+    // Both the client and the server have closed, terminate the connection
+    zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
+
+  return rv;
+}
+
+/* ******************************************************* */
+
 // returns 0 on success
 // returns <0 on error
 // no_ack: can be used to avoid sending the ACK to the client and keep
@@ -1271,8 +1295,16 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   uint8_t is_keep_alive = ((data->th_flags & TH_ACK) &&
     ((seq + 1) == conn->tcp.client_seq));
 
-  if(!is_keep_alive && (seq != (conn->tcp.client_seq + conn->tcp.tx_queue_size))) {
-    debug("ignoring out of sequence data: expected %d, got %d", conn->tcp.client_seq, seq);
+  uint32_t expected_seq = conn->tcp.client_seq + conn->tcp.tx_queue_size;
+
+  // The FIN consumes a sequence number, but client_seq only counts it after the
+  // queue is drained. Until then, the client can send at both sequence numbers:
+  // the FIN retransmissions and the segments which follow the FIN.
+  uint8_t is_after_queued_fin = (conn->tcp.client_closed && conn->tcp.tx_queue &&
+    (seq == (expected_seq + 1)));
+
+  if(!is_keep_alive && !is_after_queued_fin && (seq != expected_seq)) {
+    debug("ignoring out of sequence data: expected %d, got %d", expected_seq, seq);
     return 0;
   }
 
@@ -1290,30 +1322,28 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
     return 0;
   } else if((data->th_flags & (TH_FIN | TH_ACK)) == (TH_FIN | TH_ACK)) {
-    int rv;
-
     debug("Got TCP FIN+ACK from client");
 
-    if(conn->sock != INVALID_SOCKET) {
-      // Half close the socket to possibly signal the remote server
-      // (e.g. in after an HTTP request is completed).
-
-      if(shutdown(conn->sock, SHUT_WR) != 0)
-        debug("shutdown failed[%d] %s", errno, strerror(errno));
+    if(conn->tcp.client_closed) {
+      // FIN retransmission
+      build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
+      return send_to_client(tun, conn, TCP_HEADER_LEN);
     }
 
-    conn->tcp.client_seq += ((uint32_t)pkt->l7_len) + 1;
     conn->tcp.client_closed = 1;
 
-    // send the ACK
-    build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
-    rv = send_to_client(tun, conn, TCP_HEADER_LEN);
+    if(pkt->l7_len > 0) {
+      if(conn->sock == INVALID_SOCKET)
+        conn->tcp.client_seq += pkt->l7_len;
+      else if(enqueue_tcp_data(tun, conn, pkt->l7, pkt->l7_len, data->th_flags | TH_PUSH) != 0)
+        return -1;
+    }
 
-    if(conn->sock == INVALID_SOCKET)
-      // Both the client and the server have closed, terminate the connection
-      zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
+    // Queued data must reach the socket first, see handle_queued_tcp_data
+    if((conn->sock != INVALID_SOCKET) && conn->tcp.tx_queue)
+      return 0;
 
-    return rv;
+    return finish_client_close(tun, conn);
   }
 
   if((data->th_flags & TH_ACK) && (conn->sock != INVALID_SOCKET)) {
@@ -1344,7 +1374,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       uint32_t window = ntohs(data->th_win) << conn->tcp.window_scale;
       conn->tcp.window_size = window - in_flight;
 
-      if(!FD_ISSET(conn->sock, &tun->all_fds) && (conn->tcp.window_size > 0)) {
+      if(!FD_ISSET(conn->sock, &tun->all_fds) && (conn->tcp.window_size > 0) && !conn->tcp.fin_ack_sent) {
         log_tcp_window("[%d][Window size: %u] enabling socket", conn->tuple.src_port, conn->tcp.window_size);
 
         // make the socket selectable again
@@ -1744,6 +1774,13 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
       conn->tcp.fin_ack_sent = 1;
     }
 
+    if(conn->tcp.client_closed && conn->tcp.tx_queue) {
+      // The server may still be reading: keep the socket until the queue is
+      // drained, but stop polling it, as select would keep triggering on the EOF
+      FD_CLR(conn->sock, &tun->all_fds);
+      return 0;
+    }
+
     // close the socket, otherwise select will keep triggering
     // The client communication can still go on (e.g. client sending ACK to FIN+ACK)
     close_socket(tun, conn->sock);
@@ -1922,7 +1959,12 @@ static int handle_queued_tcp_data(zdtun_t *tun, zdtun_conn_t *conn) {
 
     if(send_to_client(tun, conn, TCP_HEADER_LEN) < 0)
       return -1;
+
+    conn->tstamp = zdtun_now(tun);
   }
+
+  if(!conn->tcp.tx_queue && conn->tcp.client_closed)
+    return finish_client_close(tun, conn);
 
   return 0;
 }
