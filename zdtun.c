@@ -737,8 +737,13 @@ static int send_syn_ack(zdtun_t *tun, zdtun_conn_t *conn) {
 
   build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0, 2 /* n. 32bit words*/);
 
-  if((rv = send_to_client(tun, conn, TCP_HEADER_LEN + 8 /* opts length */)) == 0)
+  if((rv = send_to_client(tun, conn, TCP_HEADER_LEN + 8 /* opts length */)) == 0) {
     conn->tcp.zdtun_seq += 1;
+
+    // the client may have advertised a zero window in the SYN
+    if(conn->tcp.window_size == 0)
+      FD_CLR(conn->sock, &tun->all_fds);
+  }
 
   return rv;
 }
@@ -1193,7 +1198,14 @@ static void update_tcp_window(zdtun_t *tun, zdtun_conn_t *conn, const struct tcp
     in_flight = 0xFFFFFFFF - ack_num + conn->tcp.zdtun_seq + 1;
 
   uint32_t window = ntohs(data->th_win) << conn->tcp.window_scale;
-  conn->tcp.window_size = window - in_flight;
+  conn->tcp.window_size = (window > in_flight) ? (window - in_flight) : 0;
+
+  if(conn->tcp.window_size == 0) {
+    log_tcp_window("[%d] Zero window size detected, disabling socket", conn->tuple.src_port);
+
+    // stop receiving updates for the socket, until the TCP window is updated
+    FD_CLR(conn->sock, &tun->all_fds);
+  }
 
   if(!FD_ISSET(conn->sock, &tun->all_fds) && (conn->tcp.window_size > 0) && !conn->tcp.fin_ack_sent) {
     log_tcp_window("[%d][Window size: %u] enabling socket", conn->tuple.src_port, conn->tcp.window_size);
@@ -1784,10 +1796,17 @@ static int handle_icmp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
+// The SOCKS5 handshake is not delivered to the client, so its window does not apply
+static int tcp_recv_size(const zdtun_conn_t *conn) {
+  return socks5_in_progress(conn) ? conn->tcp.mss : min(conn->tcp.window_size, conn->tcp.mss);
+}
+
+/* ******************************************************* */
+
 static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   int iphdr_len = zdtun_iphdr_len(tun, conn);
   char *payload_ptr = tun->reply_buf + iphdr_len + TCP_HEADER_LEN;
-  int to_recv = min(conn->tcp.window_size, conn->tcp.mss);
+  int to_recv = tcp_recv_size(conn);
   int l4_len = recv(conn->sock, payload_ptr, to_recv, 0);
 
   conn->tstamp = zdtun_now(tun);
@@ -2017,7 +2036,9 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
     if(conn->sock == INVALID_SOCKET)
       continue;
 
-    if(FD_ISSET(conn->sock, rd_fds)) {
+    // With a zero window, recv would return 0, which means that the server has
+    // closed. This also covers a read event which precedes the window update.
+    if(FD_ISSET(conn->sock, rd_fds) && ((ipproto != IPPROTO_TCP) || (tcp_recv_size(conn) > 0))) {
       if(ipproto == IPPROTO_TCP)
         rv = handle_tcp_reply(tun, conn);
       else if(ipproto == IPPROTO_UDP)

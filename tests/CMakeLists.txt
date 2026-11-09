@@ -67,6 +67,7 @@ endforeach()
 
 add_executable(stack stack.c ../zdtun.c ../utils.c)
 target_include_directories(stack PRIVATE ..)
+target_link_options(stack PRIVATE -Wl,--wrap=connect)
 add_dependencies(run_tests stack)
 
 set(STACK_TESTS
@@ -80,6 +81,14 @@ set(STACK_TESTS
   rst_delivered_on_close
   failed_rst_closes_once
   failed_rst_on_destroy_closes_once
+  zero_window_ack_keeps_connection
+  window_filled_by_in_flight_keeps_connection
+  window_shrink_not_overrun
+  zero_window_syn_keeps_connection
+  zero_window_syn_connect_in_progress
+  stale_read_event_with_zero_window
+  zero_window_upload_delivered
+  zero_window_syn_socks5_handshake
 )
 
 foreach(TEST_NAME ${STACK_TESTS})

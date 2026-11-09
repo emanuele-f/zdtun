@@ -51,6 +51,8 @@
 #define PAYLOAD_SIZE 1000
 #define STREAM_SIZE 200000
 #define IO_TIMEOUT_SEC 5
+#define POLL_TIMEOUT_USEC 100000
+#define SOCKS5_REQ_LEN 10
 
 typedef struct {
   zdtun_t *tun;
@@ -72,6 +74,23 @@ typedef struct {
 
 static char stream[STREAM_SIZE];
 static char client_rx[STREAM_SIZE];
+static uint8_t force_connect_in_progress;
+
+/* ******************************************************* */
+
+int __real_connect(int sock, const struct sockaddr *addr, socklen_t addr_len);
+
+// A loopback connect normally completes immediately
+int __wrap_connect(int sock, const struct sockaddr *addr, socklen_t addr_len) {
+  int rv = __real_connect(sock, addr, addr_len);
+
+  if(force_connect_in_progress && (rv == 0)) {
+    errno = EINPROGRESS;
+    return -1;
+  }
+
+  return rv;
+}
 
 /* ******************************************************* */
 
@@ -167,6 +186,25 @@ static void client_ack(test_ctx_t *ctx) {
 
 /* ******************************************************* */
 
+// Acknowledges the data only up to the ack sequence number
+static void client_ack_up_to(test_ctx_t *ctx, uint32_t ack) {
+  uint32_t server_seq = ctx->server_seq;
+
+  ctx->server_seq = ack;
+  client_ack(ctx);
+  ctx->server_seq = server_seq;
+}
+
+/* ******************************************************* */
+
+static void client_syn_with_window(test_ctx_t *ctx, uint16_t window) {
+  ctx->client_seq = CLIENT_ISN;
+  ctx->client_window = window;
+  client_send(ctx, TH_SYN, NULL, 0, NULL, 0);
+}
+
+/* ******************************************************* */
+
 // Handles a single batch of socket events
 static void process_events(test_ctx_t *ctx) {
   fd_set rd_fds;
@@ -180,6 +218,39 @@ static void process_events(test_ctx_t *ctx) {
   assert(num_ready > 0);
 
   zdtun_handle_fd(ctx->tun, &rd_fds, &wr_fds);
+}
+
+/* ******************************************************* */
+
+// Like process_events, for when the sockets are expected not to be polled
+static void poll_events(test_ctx_t *ctx) {
+  fd_set rd_fds;
+  fd_set wr_fds;
+  int max_fd = 0;
+  struct timeval timeout = {.tv_usec = POLL_TIMEOUT_USEC};
+
+  zdtun_fds(ctx->tun, &max_fd, &rd_fds, &wr_fds);
+
+  assert(select(max_fd + 1, &rd_fds, &wr_fds, NULL, &timeout) >= 0);
+
+  zdtun_handle_fd(ctx->tun, &rd_fds, &wr_fds);
+}
+
+/* ******************************************************* */
+
+static int zdtun_polls_reads(test_ctx_t *ctx) {
+  fd_set rd_fds;
+  fd_set wr_fds;
+  int max_fd = 0;
+
+  zdtun_fds(ctx->tun, &max_fd, &rd_fds, &wr_fds);
+
+  for(int fd = 0; fd <= max_fd; fd++) {
+    if(FD_ISSET(fd, &rd_fds))
+      return 1;
+  }
+
+  return 0;
 }
 
 /* ******************************************************* */
@@ -234,6 +305,15 @@ static void test_init(test_ctx_t *ctx) {
 
 /* ******************************************************* */
 
+static void accept_server_sock(test_ctx_t *ctx) {
+  ctx->server_sock = accept(ctx->listen_sock, NULL, NULL);
+  assert(ctx->server_sock >= 0);
+
+  set_recv_timeout(ctx->server_sock);
+}
+
+/* ******************************************************* */
+
 // Establishes a connection from the client to the server, via zdtun
 static void test_connect(test_ctx_t *ctx, const uint8_t *syn_opts, int syn_opts_len) {
   ctx->client_seq = CLIENT_ISN;
@@ -244,11 +324,7 @@ static void test_connect(test_ctx_t *ctx, const uint8_t *syn_opts, int syn_opts_
   while(!ctx->syn_ack_received)
     process_events(ctx);
 
-  ctx->server_sock = accept(ctx->listen_sock, NULL, NULL);
-  assert(ctx->server_sock >= 0);
-
-  set_recv_timeout(ctx->server_sock);
-
+  accept_server_sock(ctx);
   client_ack(ctx);
 }
 
@@ -529,6 +605,274 @@ static void test_failed_rst_on_destroy_closes_once() {
 
 /* ******************************************************* */
 
+static void server_send(test_ctx_t *ctx, int len) {
+  assert(send(ctx->server_sock, stream, len, 0) == len);
+}
+
+/* ******************************************************* */
+
+static void assert_connection_alive(test_ctx_t *ctx) {
+  assert(ctx->num_server_fins == 0);
+  assert(ctx->num_closes == 0);
+}
+
+/* ******************************************************* */
+
+// Reopens the window, then expects the pending server data to be delivered
+static void assert_data_flows_after_window_update(test_ctx_t *ctx, int total_len) {
+  ctx->client_window = CLIENT_WINDOW;
+  client_ack(ctx);
+
+  while(ctx->rx_len < total_len) {
+    process_events(ctx);
+    client_ack(ctx);
+  }
+
+  assert_connection_alive(ctx);
+  assert(client_received_stream(ctx, total_len));
+}
+
+/* ******************************************************* */
+
+static void test_zero_window_ack_keeps_connection() {
+  test_ctx_t ctx;
+  test_setup_with_mss(&ctx, PAYLOAD_SIZE);
+
+  server_send(&ctx, 2 * PAYLOAD_SIZE);
+
+  ctx.client_window = 0;
+  client_ack(&ctx);
+
+  poll_events(&ctx);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == 0);
+  assert(!zdtun_polls_reads(&ctx));
+
+  assert_data_flows_after_window_update(&ctx, 2 * PAYLOAD_SIZE);
+
+  // The server EOF must still be detected
+  assert(shutdown(ctx.server_sock, SHUT_WR) == 0);
+  process_events(&ctx);
+
+  assert(ctx.num_server_fins == 1);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_window_filled_by_in_flight_keeps_connection() {
+  test_ctx_t ctx;
+  test_setup_with_mss(&ctx, PAYLOAD_SIZE);
+
+  uint32_t first_ack = ctx.server_seq;
+
+  server_send(&ctx, 2 * PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(ctx.rx_len == PAYLOAD_SIZE);
+
+  ctx.client_window = PAYLOAD_SIZE;
+  client_ack_up_to(&ctx, first_ack);
+
+  poll_events(&ctx);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == PAYLOAD_SIZE);
+  assert(!zdtun_polls_reads(&ctx));
+
+  assert_data_flows_after_window_update(&ctx, 2 * PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_window_shrink_not_overrun() {
+  test_ctx_t ctx;
+  test_setup_with_mss(&ctx, PAYLOAD_SIZE);
+
+  uint32_t first_ack = ctx.server_seq;
+
+  server_send(&ctx, 3 * PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(ctx.rx_len == PAYLOAD_SIZE);
+
+  // Smaller than the bytes in flight
+  ctx.client_window = PAYLOAD_SIZE / 2;
+  client_ack_up_to(&ctx, first_ack);
+
+  poll_events(&ctx);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == PAYLOAD_SIZE);
+
+  // Only the advertised window can be used
+  client_ack(&ctx);
+  poll_events(&ctx);
+  poll_events(&ctx);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == (PAYLOAD_SIZE + (PAYLOAD_SIZE / 2)));
+
+  assert_data_flows_after_window_update(&ctx, 3 * PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_zero_window_syn_keeps_connection() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  client_syn_with_window(&ctx, 0);
+
+  // A loopback connect can either complete immediately or be in progress
+  while(!ctx.syn_ack_received)
+    process_events(&ctx);
+
+  accept_server_sock(&ctx);
+  server_send(&ctx, PAYLOAD_SIZE);
+
+  poll_events(&ctx);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == 0);
+
+  assert_data_flows_after_window_update(&ctx, PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// The connect result must not be hidden by the readable event of the server data
+static void test_zero_window_syn_connect_in_progress() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  force_connect_in_progress = 1;
+  client_syn_with_window(&ctx, 0);
+  assert(!ctx.syn_ack_received);
+
+  accept_server_sock(&ctx);
+  server_send(&ctx, PAYLOAD_SIZE);
+
+  process_events(&ctx);
+
+  assert(ctx.syn_ack_received);
+  assert_connection_alive(&ctx);
+  assert(!zdtun_polls_reads(&ctx));
+
+  assert_data_flows_after_window_update(&ctx, PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// The client can reduce the window after zdtun_fds has reported the socket as readable
+static void test_stale_read_event_with_zero_window() {
+  test_ctx_t ctx;
+  fd_set rd_fds;
+  fd_set wr_fds;
+  int max_fd = 0;
+  struct timeval timeout = {.tv_sec = IO_TIMEOUT_SEC};
+
+  test_setup_with_mss(&ctx, PAYLOAD_SIZE);
+  server_send(&ctx, PAYLOAD_SIZE);
+
+  zdtun_fds(ctx.tun, &max_fd, &rd_fds, &wr_fds);
+  assert(select(max_fd + 1, &rd_fds, &wr_fds, NULL, &timeout) == 1);
+
+  ctx.client_window = 0;
+  client_ack(&ctx);
+
+  zdtun_handle_fd(ctx.tun, &rd_fds, &wr_fds);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == 0);
+
+  assert_data_flows_after_window_update(&ctx, PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_zero_window_upload_delivered() {
+  test_ctx_t ctx;
+  char rx[PAYLOAD_SIZE];
+
+  test_setup_with_mss(&ctx, PAYLOAD_SIZE);
+  server_send(&ctx, PAYLOAD_SIZE);
+
+  ctx.client_window = 0;
+  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream, PAYLOAD_SIZE);
+
+  process_events(&ctx);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == 0);
+
+  assert(recv(ctx.server_sock, rx, PAYLOAD_SIZE, MSG_WAITALL) == PAYLOAD_SIZE);
+  assert(memcmp(rx, stream, PAYLOAD_SIZE) == 0);
+
+  assert_data_flows_after_window_update(&ctx, PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// The SOCKS5 handshake is not delivered to the client, so its window does not apply
+static void test_zero_window_syn_socks5_handshake() {
+  test_ctx_t ctx;
+  zdtun_ip_t proxy_ip = {0};
+  char rx[16];
+  const char srv_choice[] = {5, 0};
+  const char connect_reply[SOCKS5_REQ_LEN] = {5, 0, 0, 1};
+
+  test_init(&ctx);
+
+  proxy_ip.ip4 = inet_addr(SERVER_IP);
+  zdtun_set_socks5_proxy(ctx.tun, &proxy_ip, htons(ctx.server_port), 4);
+  zdtun_conn_proxy(lookup_client_conn(&ctx, 1));
+
+  client_syn_with_window(&ctx, 0);
+  accept_server_sock(&ctx);
+
+  // Completes the connect, if in progress
+  poll_events(&ctx);
+
+  assert(recv(ctx.server_sock, rx, sizeof(rx), 0) == 3);
+  assert(send(ctx.server_sock, srv_choice, sizeof(srv_choice), 0) == sizeof(srv_choice));
+  process_events(&ctx);
+
+  assert(recv(ctx.server_sock, rx, sizeof(rx), 0) == SOCKS5_REQ_LEN);
+  assert(send(ctx.server_sock, connect_reply, sizeof(connect_reply), 0) == sizeof(connect_reply));
+  process_events(&ctx);
+
+  assert(ctx.syn_ack_received);
+  assert_connection_alive(&ctx);
+  assert(!zdtun_polls_reads(&ctx));
+
+  server_send(&ctx, PAYLOAD_SIZE);
+  poll_events(&ctx);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == 0);
+
+  assert_data_flows_after_window_update(&ctx, PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 typedef struct {
   const char *name;
   void (*run)();
@@ -545,6 +889,14 @@ static const test_t tests[] = {
   {"rst_delivered_on_close", test_rst_delivered_on_close},
   {"failed_rst_closes_once", test_failed_rst_closes_once},
   {"failed_rst_on_destroy_closes_once", test_failed_rst_on_destroy_closes_once},
+  {"zero_window_ack_keeps_connection", test_zero_window_ack_keeps_connection},
+  {"window_filled_by_in_flight_keeps_connection", test_window_filled_by_in_flight_keeps_connection},
+  {"window_shrink_not_overrun", test_window_shrink_not_overrun},
+  {"zero_window_syn_keeps_connection", test_zero_window_syn_keeps_connection},
+  {"zero_window_syn_connect_in_progress", test_zero_window_syn_connect_in_progress},
+  {"stale_read_event_with_zero_window", test_stale_read_event_with_zero_window},
+  {"zero_window_upload_delivered", test_zero_window_upload_delivered},
+  {"zero_window_syn_socks5_handshake", test_zero_window_syn_socks5_handshake},
 };
 
 /* ******************************************************* */
