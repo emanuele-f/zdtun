@@ -63,7 +63,11 @@ typedef struct {
   int num_server_fins;
   int max_pkt_len;
   int rx_len;
+  int num_rsts;
+  int num_closes;
+  zdtun_conn_status_t close_status;
   uint8_t syn_ack_received;
+  uint8_t fail_rst;
 } test_ctx_t;
 
 static char stream[STREAM_SIZE];
@@ -74,6 +78,13 @@ static char client_rx[STREAM_SIZE];
 // Captures the packets sent to the client
 static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *conn_info) {
   test_ctx_t *ctx = (test_ctx_t*) zdtun_userdata(tun);
+
+  if(pkt->tcp->th_flags & TH_RST) {
+    ctx->num_rsts++;
+
+    if(ctx->fail_rst)
+      return -1;
+  }
 
   if(pkt->len > ctx->max_pkt_len)
     ctx->max_pkt_len = pkt->len;
@@ -95,6 +106,15 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
   }
 
   return 0;
+}
+
+/* ******************************************************* */
+
+static void on_connection_close(zdtun_t *tun, const zdtun_conn_t *conn_info) {
+  test_ctx_t *ctx = (test_ctx_t*) zdtun_userdata(tun);
+
+  ctx->num_closes++;
+  ctx->close_status = zdtun_conn_get_status(conn_info);
 }
 
 /* ******************************************************* */
@@ -198,6 +218,7 @@ static void open_listen_socket(test_ctx_t *ctx) {
 static void test_init(test_ctx_t *ctx) {
   static zdtun_callbacks_t callbacks = {
     .send_client = on_send_client,
+    .on_connection_close = on_connection_close,
   };
 
   memset(ctx, 0, sizeof(*ctx));
@@ -439,6 +460,75 @@ static void test_syn_short_data_offset_not_forwarded() {
 
 /* ******************************************************* */
 
+static zdtun_conn_t* lookup_client_conn(test_ctx_t *ctx, uint8_t create) {
+  char *buf = alloc_syn(ctx, 5, 5);
+  zdtun_pkt_t pkt;
+
+  assert(zdtun_parse_pkt(ctx->tun, buf, IPV4_TCP_HEADERS_LEN, &pkt) == 0);
+
+  zdtun_conn_t *conn = zdtun_lookup(ctx->tun, &pkt.tuple, create);
+  assert(conn != NULL);
+
+  free(buf);
+  return conn;
+}
+
+/* ******************************************************* */
+
+static void test_rst_delivered_on_close() {
+  test_ctx_t ctx;
+  test_setup_with_mss(&ctx, 1000);
+
+  zdtun_conn_t *conn = lookup_client_conn(&ctx, 0);
+  zdtun_conn_close(ctx.tun, conn, CONN_STATUS_SOCKET_ERROR);
+
+  assert(ctx.num_rsts == 1);
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_SOCKET_ERROR);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_failed_rst_closes_once() {
+  test_ctx_t ctx;
+  test_setup_with_mss(&ctx, 1000);
+
+  ctx.fail_rst = 1;
+
+  zdtun_conn_t *conn = lookup_client_conn(&ctx, 0);
+  zdtun_conn_close(ctx.tun, conn, CONN_STATUS_SOCKET_ERROR);
+
+  assert(ctx.num_rsts == 1);
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_SOCKET_ERROR);
+  assert(zdtun_conn_get_status(conn) == CONN_STATUS_SOCKET_ERROR);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// Like a connection blocked by the integrator, which is created but never forwarded
+static void test_failed_rst_on_destroy_closes_once() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  ctx.fail_rst = 1;
+
+  zdtun_conn_t *conn = lookup_client_conn(&ctx, 1);
+  assert(zdtun_conn_get_status(conn) == CONN_STATUS_NEW);
+
+  test_finalize_unconnected(&ctx);
+
+  assert(ctx.num_rsts == 1);
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_CLOSED);
+}
+
+/* ******************************************************* */
+
 typedef struct {
   const char *name;
   void (*run)();
@@ -452,6 +542,9 @@ static const test_t tests[] = {
   {"short_tcp_data_offset_rejected", test_short_tcp_data_offset_rejected},
   {"short_ipv4_ihl_rejected", test_short_ipv4_ihl_rejected},
   {"syn_short_data_offset_not_forwarded", test_syn_short_data_offset_not_forwarded},
+  {"rst_delivered_on_close", test_rst_delivered_on_close},
+  {"failed_rst_closes_once", test_failed_rst_closes_once},
+  {"failed_rst_on_destroy_closes_once", test_failed_rst_on_destroy_closes_once},
 };
 
 /* ******************************************************* */

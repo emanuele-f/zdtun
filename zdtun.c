@@ -669,6 +669,9 @@ void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t stat
   close_socket(tun, conn->sock);
   conn->sock = INVALID_SOCKET;
 
+  // Must be set before sending the RST, as a send_client failure closes the connection again
+  conn->status = (status >= CONN_STATUS_CLOSED) ? status : CONN_STATUS_CLOSED;
+
   if((conn->tuple.ipproto == IPPROTO_TCP)
       && !conn->tcp.fin_ack_sent) {
     // Send TCP RST
@@ -678,8 +681,6 @@ void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t stat
 
   if(conn->tuple.ipproto == IPPROTO_TCP)
     free_tx_queue(conn);
-
-  conn->status = (status >= CONN_STATUS_CLOSED) ? status : CONN_STATUS_CLOSED;
 
   if(tun->callbacks.on_connection_close)
     tun->callbacks.on_connection_close(tun, conn);

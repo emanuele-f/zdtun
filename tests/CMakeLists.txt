@@ -77,6 +77,9 @@ set(STACK_TESTS
   short_tcp_data_offset_rejected
   short_ipv4_ihl_rejected
   syn_short_data_offset_not_forwarded
+  rst_delivered_on_close
+  failed_rst_closes_once
+  failed_rst_on_destroy_closes_once
 )
 
 foreach(TEST_NAME ${STACK_TESTS})
