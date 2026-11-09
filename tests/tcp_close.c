@@ -74,6 +74,7 @@ static size_t send_max_bytes = 0;
 static int send_errno = 0;
 static int shutdown_calls = 0;
 static time_t fake_now = START_TIME_SEC;
+static uint32_t client_isn = CLIENT_ISN;
 
 ssize_t __real_send(int fd, const void *buf, size_t len, int flags);
 int __real_shutdown(int fd, int how);
@@ -185,6 +186,13 @@ static void client_retransmit_fin(test_ctx_t *ctx) {
 
 /* ******************************************************* */
 
+static void client_retransmit_fin_payload(test_ctx_t *ctx) {
+  ctx->client_seq -= PAYLOAD_SIZE + 1;
+  client_send(ctx, TH_FIN | TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+}
+
+/* ******************************************************* */
+
 // Handles a single batch of socket events
 static void process_events(test_ctx_t *ctx) {
   fd_set rd_fds;
@@ -249,7 +257,7 @@ static void test_setup(test_ctx_t *ctx) {
   ctx->tun = zdtun_init(&callbacks, ctx);
   assert(ctx->tun != NULL);
 
-  ctx->client_seq = CLIENT_ISN;
+  ctx->client_seq = client_isn;
   ctx->client_window = CLIENT_WINDOW;
   client_send(ctx, TH_SYN, NULL, 0);
 
@@ -310,6 +318,17 @@ static void server_eof_while_queued(test_ctx_t *ctx) {
 
 /* ******************************************************* */
 
+static int any_fd_set(const fd_set *fds, int max_fd) {
+  for(int fd = 0; fd <= max_fd; fd++) {
+    if(FD_ISSET(fd, fds))
+      return 1;
+  }
+
+  return 0;
+}
+
+/* ******************************************************* */
+
 static int zdtun_polls_reads(test_ctx_t *ctx) {
   fd_set rd_fds;
   fd_set wr_fds;
@@ -317,12 +336,19 @@ static int zdtun_polls_reads(test_ctx_t *ctx) {
 
   zdtun_fds(ctx->tun, &max_fd, &rd_fds, &wr_fds);
 
-  for(int fd = 0; fd <= max_fd; fd++) {
-    if(FD_ISSET(fd, &rd_fds))
-      return 1;
-  }
+  return any_fd_set(&rd_fds, max_fd);
+}
 
-  return 0;
+/* ******************************************************* */
+
+static int zdtun_polls_writes(test_ctx_t *ctx) {
+  fd_set rd_fds;
+  fd_set wr_fds;
+  int max_fd = 0;
+
+  zdtun_fds(ctx->tun, &max_fd, &rd_fds, &wr_fds);
+
+  return any_fd_set(&wr_fds, max_fd);
 }
 
 /* ******************************************************* */
@@ -999,6 +1025,93 @@ static void test_server_eof_not_polled_after_fin_retransmission() {
 
 /* ******************************************************* */
 
+static void test_fin_payload_retransmission_after_close() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  client_send(&ctx, TH_FIN | TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  uint32_t fin_ack = ctx.last_ack;
+
+  assert(fin_ack == ctx.client_seq);
+
+  ctx.last_ack = 0;
+  client_retransmit_fin_payload(&ctx);
+
+  assert(ctx.last_ack == fin_ack);
+  assert(!zdtun_polls_writes(&ctx));
+
+  ctx.last_ack = 0;
+  client_retransmit_fin_payload(&ctx);
+
+  assert(ctx.last_ack == fin_ack);
+  assert(shutdown_calls == 1);
+  assert(ctx.num_closed == 0);
+  assert(server_received_payload(&ctx));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_fin_payload_retransmission_seq_wrap() {
+  client_isn = 0xFFFFFFFF - (PAYLOAD_SIZE / 2);
+
+  test_fin_payload_retransmission_after_close();
+}
+
+/* ******************************************************* */
+
+static void test_fin_payload_retransmission_while_queued() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  uint32_t data_seq = ctx.client_seq;
+
+  send_max_bytes = PARTIAL_SEND_SIZE;
+  client_send(&ctx, TH_FIN | TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  client_retransmit_fin_payload(&ctx);
+
+  send_max_bytes = 0;
+  process_events(&ctx);
+
+  assert(ctx.last_ack == (data_seq + PAYLOAD_SIZE + 1));
+  assert(server_received_payload(&ctx));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_non_fin_ignored_at_fin_payload_seq() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  uint32_t data_seq = ctx.client_seq;
+
+  client_send(&ctx, TH_FIN | TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  int num_replies = ctx.num_replies;
+
+  ctx.client_seq = data_seq;
+  client_send(&ctx, TH_ACK | TH_PUSH, payload, PAYLOAD_SIZE);
+
+  ctx.client_seq = data_seq;
+  client_send(&ctx, TH_FIN | TH_PUSH, payload, PAYLOAD_SIZE);
+
+  assert(ctx.num_replies == num_replies);
+  assert(!zdtun_polls_writes(&ctx));
+  assert(server_received_payload(&ctx));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 typedef struct {
   const char *name;
   void (*run)();
@@ -1033,6 +1146,10 @@ static const test_t tests[] = {
   {"queued_upload_not_sent_after_server_close", test_queued_upload_not_sent_after_server_close},
   {"fin_terminates_when_server_closed", test_fin_terminates_when_server_closed},
   {"fin_payload_acked_when_server_closed", test_fin_payload_acked_when_server_closed},
+  {"fin_payload_retransmission_after_close", test_fin_payload_retransmission_after_close},
+  {"fin_payload_retransmission_seq_wrap", test_fin_payload_retransmission_seq_wrap},
+  {"fin_payload_retransmission_while_queued", test_fin_payload_retransmission_while_queued},
+  {"non_fin_ignored_at_fin_payload_seq", test_non_fin_ignored_at_fin_payload_seq},
   {"queued_upload_acked_when_server_closes", test_queued_upload_acked_when_server_closes},
   {"partially_sent_upload_acked_when_server_closes", test_partially_sent_upload_acked_when_server_closes},
   {"fin_acked_after_server_close_with_queued_upload", test_fin_acked_after_server_close_with_queued_upload},

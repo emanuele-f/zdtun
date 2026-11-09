@@ -1332,7 +1332,11 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   uint8_t is_after_queued_fin = (conn->tcp.client_closed && conn->tcp.tx_queue &&
     (seq == (expected_seq + 1)));
 
-  if(!is_keep_alive && !is_after_queued_fin && (seq != expected_seq)) {
+  uint8_t is_fin_retransmission = (conn->tcp.client_closed && !conn->tcp.tx_queue &&
+    ((data->th_flags & (TH_RST | TH_FIN | TH_ACK)) == (TH_FIN | TH_ACK)) &&
+    ((seq + pkt->l7_len + 1) == conn->tcp.client_seq));
+
+  if(!is_keep_alive && !is_after_queued_fin && !is_fin_retransmission && (seq != expected_seq)) {
     debug("ignoring out of sequence data: expected %d, got %d", expected_seq, seq);
     return 0;
   }

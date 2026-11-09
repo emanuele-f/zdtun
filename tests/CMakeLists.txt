@@ -48,6 +48,10 @@ set(TCP_CLOSE_TESTS
   queued_upload_not_sent_after_server_close
   fin_terminates_when_server_closed
   fin_payload_acked_when_server_closed
+  fin_payload_retransmission_after_close
+  fin_payload_retransmission_seq_wrap
+  fin_payload_retransmission_while_queued
+  non_fin_ignored_at_fin_payload_seq
   queued_upload_acked_when_server_closes
   partially_sent_upload_acked_when_server_closes
   fin_acked_after_server_close_with_queued_upload
