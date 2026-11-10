@@ -152,9 +152,11 @@ static void verify_reply(test_ctx_t *ctx, zdtun_pkt_t *pkt) {
   assert(zdtun_cmp_ip(ctx->ipver, &pkt->tuple.src_ip, &ctx->server_ip) == 0);
   assert(zdtun_cmp_ip(ctx->ipver, &pkt->tuple.dst_ip, &ctx->client_ip) == 0);
 
-  // the UDP checksum is optional on IPv4
-  if((ipproto == IPPROTO_UDP) && (ctx->ipver == 4) && (pkt->udp->uh_sum == 0))
+  if((ipproto == IPPROTO_UDP) && (pkt->udp->uh_sum == 0)) {
+    // the UDP checksum is optional on IPv4, while on IPv6 0 is invalid (RFC 8200 8.1)
+    assert(ctx->ipver == 4);
     return;
+  }
 
   if(ctx->ipver == 4) {
     sum = checksum_add(sum, &pkt->ip4->saddr, 4);
@@ -1611,6 +1613,54 @@ static void test_ipv6_client_udp_dnat_to_ipv4() {
 
 /* ******************************************************* */
 
+// Returns a payload word which makes the checksum of the UDP reply 0
+static uint16_t zero_udp_checksum_word(test_ctx_t *ctx) {
+  uint16_t l4_len = sizeof(struct udphdr) + 2;
+  uint8_t pseudo[4] = {0, IPPROTO_UDP, l4_len >> 8, l4_len & 0xFF};
+  uint8_t udp[8] = {ctx->server_port >> 8, ctx->server_port & 0xFF,
+          CLIENT_PORT >> 8, CLIENT_PORT & 0xFF, l4_len >> 8, l4_len & 0xFF, 0, 0};
+  uint32_t sum = 0;
+
+  sum = checksum_add(sum, &ctx->server_ip.ip6, 16);
+  sum = checksum_add(sum, &ctx->client_ip.ip6, 16);
+  sum = checksum_add(sum, pseudo, sizeof(pseudo));
+  sum = checksum_add(sum, udp, sizeof(udp));
+
+  while(sum >> 16)
+    sum = (sum & 0xFFFF) + (sum >> 16);
+
+  return 0xFFFF - sum;
+}
+
+/* ******************************************************* */
+
+static void test_ipv6_udp_zero_checksum_not_sent() {
+  test_ctx_t ctx;
+  char rx[PAYLOAD_SIZE];
+  struct sockaddr_in addr;
+  socklen_t addr_len = sizeof(addr);
+
+  test_init_ipv6(&ctx);
+  open_udp_server(&ctx);
+  dnat_to_ipv4_server(&ctx, IPPROTO_UDP);
+
+  client_send_udp(&ctx, stream, PAYLOAD_SIZE);
+  assert(recvfrom(ctx.server_sock, rx, sizeof(rx), 0, (struct sockaddr*) &addr, &addr_len) == PAYLOAD_SIZE);
+
+  uint16_t word = zero_udp_checksum_word(&ctx);
+  uint8_t payload[2] = {word >> 8, word & 0xFF};
+
+  assert(sendto(ctx.server_sock, payload, sizeof(payload), 0, (struct sockaddr*) &addr, addr_len) == sizeof(payload));
+  process_events(&ctx);
+
+  assert(ctx.rx_len == sizeof(payload));
+  assert(memcmp(client_rx, payload, sizeof(payload)) == 0);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 static void test_ipv6_client_ipv4_socks5_proxy() {
   test_ctx_t ctx;
   zdtun_ip_t proxy_ip = {0};
@@ -1700,6 +1750,7 @@ static const test_t tests[] = {
   {"retransmitted_byte_acked_once_after_server_close", test_retransmitted_byte_acked_once_after_server_close},
   {"ipv6_client_tcp_dnat_to_ipv4", test_ipv6_client_tcp_dnat_to_ipv4},
   {"ipv6_client_udp_dnat_to_ipv4", test_ipv6_client_udp_dnat_to_ipv4},
+  {"ipv6_udp_zero_checksum_not_sent", test_ipv6_udp_zero_checksum_not_sent},
   {"ipv6_client_ipv4_socks5_proxy", test_ipv6_client_ipv4_socks5_proxy},
 };
 

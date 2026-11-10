@@ -106,6 +106,7 @@ set(STACK_TESTS
   retransmitted_byte_acked_once_after_server_close
   ipv6_client_tcp_dnat_to_ipv4
   ipv6_client_udp_dnat_to_ipv4
+  ipv6_udp_zero_checksum_not_sent
   ipv6_client_ipv4_socks5_proxy
 )
 

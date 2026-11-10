@@ -589,13 +589,19 @@ uint16_t zdtun_l3_checksum(zdtun_t *tun, zdtun_conn_t *conn, char *ipbuf, char *
 
     pseudo.ip6ph_src = ip_header->saddr;
     pseudo.ip6ph_dst = ip_header->daddr;
-    pseudo.ip6ph_len = ip_header->payload_len;
+    pseudo.ip6ph_len = htonl(l3_len);
     pseudo.ip6ph_nxt = ((ipver == 6) && (ipproto == IPPROTO_ICMP)) ? IPPROTO_ICMPV6 : ipproto;
 
     rv = calc_checksum(rv, (uint8_t*)&pseudo, sizeof(pseudo));
   }
 
-  return ~rv;
+  rv = ~rv;
+
+  // A zero UDP checksum means "no checksum", which is invalid on IPv6 (RFC 768, RFC 8200 8.1)
+  if((ipproto == IPPROTO_UDP) && (rv == 0))
+    rv = 0xFFFF;
+
+  return rv;
 }
 
 /* ******************************************************* */
