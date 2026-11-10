@@ -103,12 +103,13 @@ set(STACK_TESTS
   zero_window_syn_socks5_handshake
   socks5_server_close_during_handshake
   large_window_scale_clamped
-  syn_window_not_scaled
   syn_ack_window_not_scaled
   window_scale_not_sent_unsolicited
   server_data_before_connect_handled
   server_eof_before_connect_handled
   server_reset_before_connect_handled
+  server_data_queued_until_handshake_ack
+  stale_read_event_before_handshake_ack
   retransmitted_byte_delivered_once
   retransmitted_byte_with_fin_delivered_once
   retransmitted_byte_delivered_once_after_server_eof

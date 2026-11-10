@@ -203,6 +203,10 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
     assert(ntohl(pkt->tcp->th_seq) == ctx->server_seq);
   }
 
+  // The data is queued until the client ACKs the SYN+ACK (RFC 9293 3.10.2)
+  if(pkt->l7_len > 0)
+    assert(ctx->syn_ack_acked);
+
   if(pkt->tcp->th_flags & TH_SYN) {
     ctx->syn_ack_received = 1;
     ctx->server_seq = ntohl(pkt->tcp->th_seq) + 1;
@@ -975,27 +979,6 @@ static void test_large_window_scale_clamped() {
 
 /* ******************************************************* */
 
-static void test_syn_window_not_scaled() {
-  test_ctx_t ctx;
-  test_init(&ctx, on_send_client);
-
-  connect_with_window_scale(&ctx, PAYLOAD_SIZE, 7);
-  server_send(&ctx, 5 * PAYLOAD_SIZE);
-
-  poll_events(&ctx);
-  poll_events(&ctx);
-
-  // Until the client ACKs the SYN+ACK, only the SYN window can be used
-  assert_connection_alive(&ctx);
-  assert(ctx.rx_len == PAYLOAD_SIZE);
-
-  assert_data_flows_after_window_update(&ctx, 5 * PAYLOAD_SIZE);
-
-  test_teardown(&ctx);
-}
-
-/* ******************************************************* */
-
 static void test_syn_ack_window_not_scaled() {
   test_ctx_t ctx;
   test_init(&ctx, on_send_client);
@@ -1031,18 +1014,24 @@ static void test_window_scale_not_sent_unsolicited() {
 
 // Waits for the socket to become readable, so that the server data or EOF is
 // already there when zdtun handles the connect completion
-static void process_events_when_readable(test_ctx_t *ctx) {
-  fd_set rd_fds;
-  fd_set wr_fds;
+static void select_when_readable(test_ctx_t *ctx, fd_set *rd_fds, fd_set *wr_fds) {
   int max_fd = 0;
   struct timeval timeout = {.tv_sec = IO_TIMEOUT_SEC};
 
-  zdtun_fds(ctx->tun, &max_fd, &rd_fds, &wr_fds);
-  assert(select(max_fd + 1, &rd_fds, NULL, NULL, &timeout) == 1);
+  zdtun_fds(ctx->tun, &max_fd, rd_fds, wr_fds);
+  assert(select(max_fd + 1, rd_fds, NULL, NULL, &timeout) == 1);
 
-  zdtun_fds(ctx->tun, &max_fd, &rd_fds, &wr_fds);
-  assert(select(max_fd + 1, &rd_fds, &wr_fds, NULL, &timeout) == 2);
+  zdtun_fds(ctx->tun, &max_fd, rd_fds, wr_fds);
+  assert(select(max_fd + 1, rd_fds, wr_fds, NULL, &timeout) == 2);
+}
 
+/* ******************************************************* */
+
+static void process_events_when_readable(test_ctx_t *ctx) {
+  fd_set rd_fds;
+  fd_set wr_fds;
+
+  select_when_readable(ctx, &rd_fds, &wr_fds);
   zdtun_handle_fd(ctx->tun, &rd_fds, &wr_fds);
 }
 
@@ -1131,6 +1120,55 @@ static void test_server_reset_before_connect_handled() {
   assert(ctx.num_closes == 1);
   assert(ctx.close_status == CONN_STATUS_RESET);
   assert(zdtun_conn_get_error(conn) == ECONNRESET);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// The data is queued until the client ACKs the SYN+ACK (RFC 9293 3.10.2)
+static void test_server_data_queued_until_handshake_ack() {
+  test_ctx_t ctx;
+  test_init(&ctx, on_send_client);
+
+  connect_with_window_scale(&ctx, CLIENT_WINDOW, 7);
+  server_send(&ctx, 5 * PAYLOAD_SIZE);
+
+  poll_events(&ctx);
+  poll_events(&ctx);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == 0);
+  assert(!zdtun_polls_reads(&ctx));
+
+  assert_data_flows_after_window_update(&ctx, 5 * PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// The read event reported with the connect completion must not deliver the data
+static void test_stale_read_event_before_handshake_ack() {
+  test_ctx_t ctx;
+  fd_set rd_fds;
+  fd_set wr_fds;
+
+  test_init(&ctx, on_send_client);
+  connect_in_progress(&ctx);
+  server_send(&ctx, PAYLOAD_SIZE);
+
+  select_when_readable(&ctx, &rd_fds, &wr_fds);
+  zdtun_handle_fd(ctx.tun, &rd_fds, &wr_fds);
+  assert(ctx.syn_ack_received);
+
+  FD_ZERO(&wr_fds);
+  zdtun_handle_fd(ctx.tun, &rd_fds, &wr_fds);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == 0);
+
+  assert_data_flows_after_window_update(&ctx, PAYLOAD_SIZE);
 
   test_teardown(&ctx);
 }
@@ -1497,12 +1535,13 @@ static const test_t tests[] = {
   {"zero_window_syn_socks5_handshake", test_zero_window_syn_socks5_handshake},
   {"socks5_server_close_during_handshake", test_socks5_server_close_during_handshake},
   {"large_window_scale_clamped", test_large_window_scale_clamped},
-  {"syn_window_not_scaled", test_syn_window_not_scaled},
   {"syn_ack_window_not_scaled", test_syn_ack_window_not_scaled},
   {"window_scale_not_sent_unsolicited", test_window_scale_not_sent_unsolicited},
   {"server_data_before_connect_handled", test_server_data_before_connect_handled},
   {"server_eof_before_connect_handled", test_server_eof_before_connect_handled},
   {"server_reset_before_connect_handled", test_server_reset_before_connect_handled},
+  {"server_data_queued_until_handshake_ack", test_server_data_queued_until_handshake_ack},
+  {"stale_read_event_before_handshake_ack", test_stale_read_event_before_handshake_ack},
   {"retransmitted_byte_delivered_once", test_retransmitted_byte_delivered_once},
   {"retransmitted_byte_with_fin_delivered_once", test_retransmitted_byte_with_fin_delivered_once},
   {"retransmitted_byte_delivered_once_after_server_eof", test_retransmitted_byte_delivered_once_after_server_eof},

@@ -758,9 +758,10 @@ static int send_syn_ack(zdtun_t *tun, zdtun_conn_t *conn) {
   if((rv = send_to_client(tun, conn, TCP_HEADER_LEN + optslen)) == 0) {
     conn->tcp.zdtun_seq += 1;
 
-    // the client may have advertised a zero window in the SYN
-    if(conn->tcp.window_size == 0)
-      FD_CLR(conn->sock, &tun->all_fds);
+    // The server data must be queued until the client ACKs the SYN+ACK
+    // (RFC 9293 3.10.2), which sets the window, see update_tcp_window
+    conn->tcp.window_size = 0;
+    FD_CLR(conn->sock, &tun->all_fds);
   }
 
   return rv;
@@ -1341,8 +1342,6 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
     debug("MSS: %d, scale: %d\n", mss, scale);
 
-    // The window of a SYN is never scaled (RFC 7323 2.2)
-    conn->tcp.window_size = ntohs(data->th_win);
     conn->tcp.window_scale = scale;
     conn->tcp.mss = mss;
 

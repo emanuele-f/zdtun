@@ -66,6 +66,7 @@ typedef struct {
   int num_closes;
   zdtun_conn_status_t close_status;
   uint8_t syn_ack_received;
+  uint8_t syn_ack_acked;
   uint8_t fail_rst;
 } test_ctx_t;
 

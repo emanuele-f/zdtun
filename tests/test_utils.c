@@ -224,6 +224,9 @@ void client_send_opts(test_ctx_t *ctx, uint8_t flags, const uint8_t *opts, int o
 
   assert(zdtun_easy_forward(ctx->tun, buf, pkt_len) != NULL);
 
+  if((flags & TH_ACK) && ctx->syn_ack_received)
+    ctx->syn_ack_acked = 1;
+
   ctx->client_seq += len + ((flags & (TH_SYN | TH_FIN)) ? 1 : 0);
 }
 
