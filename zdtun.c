@@ -119,6 +119,7 @@ typedef struct zdtun_conn {
       u_int8_t window_scale;   // client/zdtun TCP window scale
 
       struct {
+        uint8_t syn_received:1;
         uint8_t fin_ack_sent:1;
         uint8_t client_closed:1;
       };
@@ -676,8 +677,9 @@ void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t stat
   // Must be set before sending the RST, as a send_client failure closes the connection again
   conn->status = (status >= CONN_STATUS_CLOSED) ? status : CONN_STATUS_CLOSED;
 
+  // Without a SYN, the client has no connection to reset
   if((conn->tuple.ipproto == IPPROTO_TCP)
-      && !conn->tcp.fin_ack_sent) {
+      && conn->tcp.syn_received && !conn->tcp.fin_ack_sent) {
     // Send TCP RST
     build_reply_tcpip(tun, conn, TH_RST | TH_ACK, 0, 0);
     send_to_client(tun, conn, TCP_HEADER_LEN);
@@ -1247,6 +1249,11 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     debug("ignore TCP packet, we are connecting");
     return 0;
   } else if(conn->status == CONN_STATUS_NEW) {
+    // Set before any failure, so that the RST acknowledges the SYN
+    conn->tcp.client_seq = ntohl(data->th_seq) + 1;
+    conn->tcp.zdtun_seq = 0x77EB77EB;
+    conn->tcp.syn_received = 1;
+
     debug("Allocating new TCP socket for port %d", ntohs(conn->tuple.dst_port));
     socket_t tcp_sock = open_socket(tun, family, SOCK_STREAM, IPPROTO_TCP);
 
@@ -1338,9 +1345,6 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
         return 0;
       }
     }
-
-    conn->tcp.client_seq = ntohl(data->th_seq) + 1;
-    conn->tcp.zdtun_seq = 0x77EB77EB;
 
     if(!in_progress)
       return tcp_socket_syn(tun, conn);

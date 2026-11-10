@@ -91,6 +91,7 @@ typedef struct {
 static char stream[STREAM_SIZE];
 static char client_rx[STREAM_SIZE];
 static uint8_t force_connect_in_progress;
+static int force_connect_error;
 
 /* ******************************************************* */
 
@@ -98,6 +99,11 @@ int __real_connect(int sock, const struct sockaddr *addr, socklen_t addr_len);
 
 // A loopback connect normally completes immediately
 int __wrap_connect(int sock, const struct sockaddr *addr, socklen_t addr_len) {
+  if(force_connect_error) {
+    errno = force_connect_error;
+    return -1;
+  }
+
   int rv = __real_connect(sock, addr, addr_len);
 
   if(force_connect_in_progress && (rv == 0)) {
@@ -741,19 +747,70 @@ static void test_failed_rst_closes_once() {
 
 /* ******************************************************* */
 
-// Like a connection blocked by the integrator, which is created but never forwarded
 static void test_failed_rst_on_destroy_closes_once() {
+  test_ctx_t ctx;
+  test_setup_with_mss(&ctx, 1000);
+
+  ctx.fail_rst = 1;
+
+  test_teardown(&ctx);
+
+  assert(ctx.num_rsts == 1);
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_CLOSED);
+}
+
+/* ******************************************************* */
+
+// A client in SYN_SENT only accepts a RST which acknowledges its SYN
+static void test_connect_error_rst_acks_syn() {
   test_ctx_t ctx;
   test_init(&ctx);
 
-  ctx.fail_rst = 1;
+  force_connect_error = ENETUNREACH;
+  client_syn_with_window(&ctx, CLIENT_WINDOW);
+  force_connect_error = 0;
+
+  assert(!ctx.syn_ack_received);
+  assert(ctx.num_rsts == 1);
+  assert(ctx.last_ack == (CLIENT_ISN + 1));
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_UNREACHABLE);
+
+  test_finalize_unconnected(&ctx);
+}
+
+/* ******************************************************* */
+
+// Like a connection blocked by the integrator, which is created but never forwarded
+static void test_unforwarded_conn_close_sends_no_rst() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  zdtun_conn_t *conn = lookup_client_conn(&ctx, 1);
+  zdtun_conn_close(ctx.tun, conn, CONN_STATUS_CLOSED);
+
+  assert(ctx.num_rsts == 0);
+  assert(ctx.num_closes == 1);
+
+  test_finalize_unconnected(&ctx);
+
+  assert(ctx.num_rsts == 0);
+  assert(ctx.num_closes == 1);
+}
+
+/* ******************************************************* */
+
+static void test_unforwarded_conn_destroy_sends_no_rst() {
+  test_ctx_t ctx;
+  test_init(&ctx);
 
   zdtun_conn_t *conn = lookup_client_conn(&ctx, 1);
   assert(zdtun_conn_get_status(conn) == CONN_STATUS_NEW);
 
   test_finalize_unconnected(&ctx);
 
-  assert(ctx.num_rsts == 1);
+  assert(ctx.num_rsts == 0);
   assert(ctx.num_closes == 1);
   assert(ctx.close_status == CONN_STATUS_CLOSED);
 }
@@ -1540,6 +1597,9 @@ static const test_t tests[] = {
   {"rst_delivered_on_close", test_rst_delivered_on_close},
   {"failed_rst_closes_once", test_failed_rst_closes_once},
   {"failed_rst_on_destroy_closes_once", test_failed_rst_on_destroy_closes_once},
+  {"connect_error_rst_acks_syn", test_connect_error_rst_acks_syn},
+  {"unforwarded_conn_close_sends_no_rst", test_unforwarded_conn_close_sends_no_rst},
+  {"unforwarded_conn_destroy_sends_no_rst", test_unforwarded_conn_destroy_sends_no_rst},
   {"zero_window_ack_keeps_connection", test_zero_window_ack_keeps_connection},
   {"window_filled_by_in_flight_keeps_connection", test_window_filled_by_in_flight_keeps_connection},
   {"window_shrink_not_overrun", test_window_shrink_not_overrun},

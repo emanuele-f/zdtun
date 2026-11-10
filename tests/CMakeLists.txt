@@ -81,6 +81,9 @@ set(STACK_TESTS
   rst_delivered_on_close
   failed_rst_closes_once
   failed_rst_on_destroy_closes_once
+  connect_error_rst_acks_syn
+  unforwarded_conn_close_sends_no_rst
+  unforwarded_conn_destroy_sends_no_rst
   zero_window_ack_keeps_connection
   window_filled_by_in_flight_keeps_connection
   window_shrink_not_overrun
