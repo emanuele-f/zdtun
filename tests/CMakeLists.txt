@@ -45,17 +45,22 @@ set(TCP_CLOSE_TESTS
   upload_sent_while_server_sending
   close_completed_while_server_sending
   drain_completed_with_server_eof
-  queued_upload_not_sent_after_server_close
+  queued_upload_sent_after_server_eof
+  upload_delivered_after_server_half_close
+  fin_propagated_after_server_half_close
   fin_terminates_when_server_closed
-  fin_payload_acked_when_server_closed
+  fin_payload_delivered_after_server_eof
   fin_payload_retransmission_after_close
   fin_payload_retransmission_seq_wrap
   fin_payload_retransmission_while_queued
   non_fin_ignored_at_fin_payload_seq
-  queued_upload_acked_when_server_closes
-  partially_sent_upload_acked_when_server_closes
-  fin_acked_after_server_close_with_queued_upload
-  data_acked_after_server_close_with_queued_upload
+  queued_upload_not_acked_at_server_eof
+  partially_sent_upload_delivered_after_server_eof
+  fin_acked_after_server_eof_with_queued_upload
+  data_queued_after_server_eof_with_queued_upload
+  rst_on_send_error_after_server_eof
+  rst_after_upload_to_closed_server
+  rst_on_idle_timeout_after_server_eof
   window_update_applied_by_fin
   window_update_applied_by_fin_retransmission
   server_eof_not_polled_after_fin_retransmission
@@ -94,6 +99,7 @@ set(STACK_TESTS
   stale_read_event_with_zero_window
   zero_window_upload_delivered
   zero_window_syn_socks5_handshake
+  socks5_server_close_during_handshake
   large_window_scale_clamped
   syn_window_not_scaled
   syn_ack_window_not_scaled
@@ -103,7 +109,7 @@ set(STACK_TESTS
   server_reset_before_connect_handled
   retransmitted_byte_delivered_once
   retransmitted_byte_with_fin_delivered_once
-  retransmitted_byte_acked_once_after_server_close
+  retransmitted_byte_delivered_once_after_server_eof
   ipv6_client_tcp_dnat_to_ipv4
   ipv6_client_udp_dnat_to_ipv4
   ipv6_udp_zero_checksum_not_sent

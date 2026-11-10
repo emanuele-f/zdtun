@@ -487,10 +487,6 @@ static int send_to_client(zdtun_t *tun, zdtun_conn_t *conn, int l3_len) {
   } else {
     debug("send_client failed [%d]", rv);
 
-    if(conn->tuple.ipproto == IPPROTO_TCP)
-        // important: set this to prevent close_conn to call send_to_client again in a loop
-        conn->tcp.fin_ack_sent = 1;
-
     zdtun_conn_close(tun, conn, CONN_STATUS_CLIENT_ERROR);
   }
 
@@ -683,9 +679,12 @@ void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t stat
   // Must be set before sending the RST, as a send_client failure closes the connection again
   conn->status = (status >= CONN_STATUS_CLOSED) ? status : CONN_STATUS_CLOSED;
 
-  // Without a SYN, the client has no connection to reset
-  if((conn->tuple.ipproto == IPPROTO_TCP)
-      && conn->tcp.syn_received && !conn->tcp.fin_ack_sent) {
+  // Without a SYN, the client has no connection to reset. No RST is needed after
+  // a graceful close: both FINs sent and all the client data delivered. A server
+  // FIN alone is a half close, so the client must be told when its data is lost
+  if((conn->tuple.ipproto == IPPROTO_TCP) && conn->tcp.syn_received
+      && (status != CONN_STATUS_CLIENT_ERROR)
+      && !(conn->tcp.fin_ack_sent && conn->tcp.client_closed && !conn->tcp.tx_queue)) {
     // Send TCP RST
     build_reply_tcpip(tun, conn, TH_RST | TH_ACK, 0, 0);
     send_to_client(tun, conn, TCP_HEADER_LEN);
@@ -793,11 +792,15 @@ static int tcp_socket_syn(zdtun_t *tun, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
-static void tcp_socket_fin_ack(zdtun_t *tun, zdtun_conn_t *conn) {
+static int tcp_socket_fin_ack(zdtun_t *tun, zdtun_conn_t *conn) {
+  int rv;
+
   build_reply_tcpip(tun, conn, TH_FIN | TH_ACK, 0, 0);
 
-  if(send_to_client(tun, conn, TCP_HEADER_LEN) == 0)
+  if((rv = send_to_client(tun, conn, TCP_HEADER_LEN)) == 0)
     conn->tcp.zdtun_seq += 1;
+
+  return rv;
 }
 
 /* ******************************************************* */
@@ -1185,7 +1188,7 @@ static int finish_client_close(zdtun_t *tun, zdtun_conn_t *conn) {
 
   // Half close the socket to possibly signal the remote server
   // (e.g. after an HTTP request is completed).
-  if((conn->sock != INVALID_SOCKET) && (shutdown(conn->sock, SHUT_WR) != 0))
+  if(shutdown(conn->sock, SHUT_WR) != 0)
     debug("shutdown failed[%d] %s", errno, strerror(errno));
 
   conn->tcp.client_seq += 1;
@@ -1193,7 +1196,7 @@ static int finish_client_close(zdtun_t *tun, zdtun_conn_t *conn) {
   build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
   rv = send_to_client(tun, conn, TCP_HEADER_LEN);
 
-  if((conn->sock == INVALID_SOCKET) || conn->tcp.fin_ack_sent)
+  if(conn->tcp.fin_ack_sent)
     // Both the client and the server have closed, terminate the connection
     zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
 
@@ -1401,8 +1404,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   } else if((data->th_flags & (TH_FIN | TH_ACK)) == (TH_FIN | TH_ACK)) {
     debug("Got TCP FIN+ACK from client");
 
-    if(conn->sock != INVALID_SOCKET)
-      update_tcp_window(tun, conn, data);
+    update_tcp_window(tun, conn, data);
 
     if(conn->tcp.client_closed) {
       // FIN retransmission
@@ -1413,15 +1415,12 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     conn->tcp.client_closed = 1;
 
     // A keep-alive match is a retransmission of an already received byte
-    if((pkt->l7_len > 0) && !is_keep_alive) {
-      if(conn->sock == INVALID_SOCKET)
-        conn->tcp.client_seq += pkt->l7_len;
-      else if(enqueue_tcp_data(tun, conn, pkt->l7, pkt->l7_len, data->th_flags | TH_PUSH) != 0)
-        return -1;
-    }
+    if((pkt->l7_len > 0) && !is_keep_alive &&
+        (enqueue_tcp_data(tun, conn, pkt->l7, pkt->l7_len, data->th_flags | TH_PUSH) != 0))
+      return -1;
 
     // Queued data must reach the socket first, see handle_queued_tcp_data
-    if((conn->sock != INVALID_SOCKET) && conn->tcp.tx_queue)
+    if(conn->tcp.tx_queue)
       return 0;
 
     return finish_client_close(tun, conn);
@@ -1430,11 +1429,9 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
   if(is_keep_alive) {
     debug("TCP KEEPALIVE");
 
-    if(conn->sock != INVALID_SOCKET) {
-      int val = 1;
-      if(setsockopt(conn->sock, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) != 0)
-        error("setsockopt SO_KEEPALIVE failed[%d]: %s", errno, strerror(errno));
-    }
+    val = 1;
+    if(setsockopt(conn->sock, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) != 0)
+      error("setsockopt SO_KEEPALIVE failed[%d]: %s", errno, strerror(errno));
 
     // Assume that the server is alive until its socket is closed.
     // The keep-alive byte, if any, was already received, so it is only ACKed.
@@ -1442,24 +1439,14 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     return send_to_client(tun, conn, TCP_HEADER_LEN);
   }
 
-  if((data->th_flags & TH_ACK) && (conn->sock != INVALID_SOCKET))
+  if(data->th_flags & TH_ACK)
     update_tcp_window(tun, conn, data);
 
   // check for payload data (avoid sending ACK to an ACK)
-  if(pkt->l7_len > 0) {
-    if(conn->sock == INVALID_SOCKET) {
-      // The server may have closed the connection while the client is still
-      // sending data. We should still ACK this data
-      debug("Write after server socket closed");
-
-      // send the ACK
-      conn->tcp.client_seq += pkt->l7_len;
-      build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
-      return send_to_client(tun, conn, TCP_HEADER_LEN);
-    } else
-      // data send is deferred to handle_queued_tcp_data, when socket will be ready for TX
-      return enqueue_tcp_data(tun, conn, pkt->l7, pkt->l7_len, data->th_flags);
-  }
+  if(pkt->l7_len > 0)
+    // data send is deferred to handle_queued_tcp_data, when socket will be ready for TX.
+    // The server may have only half closed the connection, so the data is still sent
+    return enqueue_tcp_data(tun, conn, pkt->l7, pkt->l7_len, data->th_flags);
 
   return 0;
 }
@@ -1838,35 +1825,31 @@ static int handle_tcp_reply(zdtun_t *tun, zdtun_conn_t *conn) {
   else if(l4_len == 0) {
     debug("Server socket closed");
 
-    if(!conn->tcp.client_closed) {
-      // The socket is closed below, so the queued data can no longer be
-      // delivered. ACK it, like the data received after the close
-      conn->tcp.client_seq += conn->tcp.tx_queue_size;
-      conn->tcp.tx_queue_size = 0;
-      free_tx_queue(conn);
+    if(socks5_in_progress(conn)) {
+      // The client is still waiting for the SYN+ACK, so it only accepts a RST
+      error("SOCKS5 server closed the connection during the handshake");
+      zdtun_conn_close(tun, conn, CONN_STATUS_SOCKS5_ERROR);
+      return -1;
     }
 
     if(!conn->tcp.fin_ack_sent) {
-      tcp_socket_fin_ack(tun, conn);
+      if(tcp_socket_fin_ack(tun, conn) != 0)
+        return -1;
+
       conn->tcp.fin_ack_sent = 1;
     }
 
-    if(conn->tcp.client_closed && conn->tcp.tx_queue) {
-      // The server may still be reading: keep the socket until the queue is
-      // drained, but stop polling it, as select would keep triggering on the EOF
+    if(!conn->tcp.client_closed || conn->tcp.tx_queue) {
+      // The EOF only means that the server will not send more data (e.g. SHUT_WR),
+      // it may still be reading. Keep the socket to deliver the client data,
+      // until the client closes, but stop polling it, as select would keep
+      // triggering on the EOF. If the server has fully closed, the send fails.
       FD_CLR(conn->sock, &tun->all_fds);
       return 0;
     }
 
-    // close the socket, otherwise select will keep triggering
-    // The client communication can still go on (e.g. client sending ACK to FIN+ACK)
-    close_socket(tun, conn->sock);
-    conn->sock = INVALID_SOCKET;
-
-    if(conn->tcp.client_closed)
-      // Both the client and the server have closed, terminate the connection
-      zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
-
+    // Both the client and the server have closed, terminate the connection
+    zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
     return 0;
   }
 

@@ -22,7 +22,7 @@
  */
 
 /*
- * Tests the client side close of a TCP connection.
+ * Tests the close of a TCP connection, including the half close from either side.
  *
  * The test acts as the client, by crafting the IP packets and reading the
  * zdtun replies, and as the server, via a loopback socket. Since zdtun only
@@ -31,6 +31,7 @@
  * and the clock seen by zdtun are scripted, see the __wrap_ functions.
  */
 
+#include <signal.h>
 #include "test_utils.h"
 
 #define PARTIAL_SEND_SIZE 40
@@ -98,6 +99,9 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
   if(pkt->tcp->th_flags & TH_FIN)
     ctx->num_server_fins++;
 
+  if(pkt->tcp->th_flags & TH_RST)
+    ctx->num_rsts++;
+
   ctx->num_replies++;
 
   return 0;
@@ -131,10 +135,12 @@ static void test_setup(test_ctx_t *ctx) {
 
 /* ******************************************************* */
 
-static void server_close_while_queued(test_ctx_t *ctx) {
-  send_eagain_count = NUM_EAGAIN_FOREVER;
-  client_send(ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
-  close_server_socket(ctx);
+// The server half closes the connection: it stops sending but keeps reading
+static void server_eof(test_ctx_t *ctx) {
+  assert(__real_shutdown(ctx->server_sock, SHUT_WR) == 0);
+
+  // zdtun reads the server EOF
+  process_events(ctx);
 }
 
 /* ******************************************************* */
@@ -144,10 +150,17 @@ static void server_eof_while_queued(test_ctx_t *ctx) {
   client_send(ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
   client_send(ctx, TH_FIN | TH_ACK, NULL, 0);
 
-  assert(__real_shutdown(ctx->server_sock, SHUT_WR) == 0);
+  server_eof(ctx);
+}
 
-  // zdtun reads the server EOF
-  process_events(ctx);
+/* ******************************************************* */
+
+// Unlike server_eof_while_queued, the client has not closed
+static void server_eof_with_queued_upload(test_ctx_t *ctx) {
+  send_eagain_count = NUM_EAGAIN_FOREVER;
+  client_send(ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+
+  server_eof(ctx);
 }
 
 /* ******************************************************* */
@@ -538,6 +551,7 @@ static void test_connection_closed_after_server_eof_drain() {
   process_events(&ctx);
 
   assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 0);
 
   test_teardown(&ctx);
 }
@@ -590,7 +604,9 @@ static void test_send_error_after_server_eof_closes() {
   send_errno = EPIPE;
   process_events(&ctx);
 
+  // The upload was lost and the client FIN was not ACKed
   assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 1);
 
   test_teardown(&ctx);
 }
@@ -650,16 +666,62 @@ static void test_drain_completed_with_server_eof() {
 
 /* ******************************************************* */
 
-// The socket is both readable and writable, but is closed by the read
-static void test_queued_upload_not_sent_after_server_close() {
+// The socket is both readable and writable: reading the EOF must not drop the upload
+static void test_queued_upload_sent_after_server_eof() {
   test_ctx_t ctx;
   test_setup(&ctx);
 
   client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
-  close_server_socket(&ctx);
+  server_eof(&ctx);
 
   assert(ctx.num_server_fins == 1);
+  assert(ctx.last_ack == ctx.client_seq);
   assert(ctx.num_closes == 0);
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// After a server half close, the client can still send data (RFC 9293 3.6)
+static void test_upload_delivered_after_server_half_close() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  uint32_t data_seq = ctx.client_seq;
+
+  server_eof(&ctx);
+
+  assert(ctx.num_server_fins == 1);
+  assert(!zdtun_polls_reads(&ctx));
+
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(ctx.last_ack == (data_seq + PAYLOAD_SIZE));
+  assert(ctx.num_closes == 0);
+  assert(ctx.num_rsts == 0);
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_fin_propagated_after_server_half_close() {
+  test_ctx_t ctx;
+  char buf[1];
+  test_setup(&ctx);
+
+  server_eof(&ctx);
+  client_send(&ctx, TH_FIN | TH_ACK, NULL, 0);
+
+  assert(shutdown_calls == 1);
+  assert(ctx.last_ack == ctx.client_seq);
+  assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 0);
+  assert(server_read(&ctx, buf, sizeof(buf)) == 0);
 
   test_teardown(&ctx);
 }
@@ -674,89 +736,183 @@ static void test_fin_terminates_when_server_closed() {
   client_send(&ctx, TH_FIN | TH_ACK, NULL, 0);
 
   assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 0);
 
   test_teardown(&ctx);
 }
 
 /* ******************************************************* */
 
-static void test_fin_payload_acked_when_server_closed() {
+static void test_fin_payload_delivered_after_server_eof() {
   test_ctx_t ctx;
   test_setup(&ctx);
 
   uint32_t data_seq = ctx.client_seq;
 
-  close_server_socket(&ctx);
+  server_eof(&ctx);
   client_send(&ctx, TH_FIN | TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+  process_events(&ctx);
 
   assert(ctx.last_ack == (data_seq + PAYLOAD_SIZE + 1));
+  assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 0);
+  assert(server_received_payload(&ctx));
 
   test_teardown(&ctx);
 }
 
 /* ******************************************************* */
 
-static void test_queued_upload_acked_when_server_closes() {
+// The queued data is only ACKed once written to the socket
+static void test_queued_upload_not_acked_at_server_eof() {
   test_ctx_t ctx;
   test_setup(&ctx);
 
-  server_close_while_queued(&ctx);
+  uint32_t data_seq = ctx.client_seq;
+
+  server_eof_with_queued_upload(&ctx);
 
   assert(ctx.num_server_fins == 1);
-  assert(ctx.last_ack == ctx.client_seq);
+  assert(ctx.last_ack == data_seq);
   assert(ctx.num_closes == 0);
+
+  send_eagain_count = 0;
+  process_events(&ctx);
+
+  assert(ctx.last_ack == ctx.client_seq);
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
 
   test_teardown(&ctx);
 }
 
 /* ******************************************************* */
 
-static void test_partially_sent_upload_acked_when_server_closes() {
+static void test_partially_sent_upload_delivered_after_server_eof() {
   test_ctx_t ctx;
-  char buf[PARTIAL_SEND_SIZE];
   test_setup(&ctx);
+
+  uint32_t data_seq = ctx.client_seq;
 
   send_max_bytes = PARTIAL_SEND_SIZE;
   client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
   process_events(&ctx);
 
-  // Unread data would turn the server close into a RST
-  assert(server_read(&ctx, buf, sizeof(buf)) == sizeof(buf));
-
   send_eagain_count = NUM_EAGAIN_FOREVER;
-  close_server_socket(&ctx);
+  server_eof(&ctx);
+
+  assert(ctx.last_ack == (data_seq + PARTIAL_SEND_SIZE));
+
+  send_eagain_count = 0;
+  send_max_bytes = 0;
+  process_events(&ctx);
 
   assert(ctx.last_ack == ctx.client_seq);
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
 
   test_teardown(&ctx);
 }
 
 /* ******************************************************* */
 
-static void test_fin_acked_after_server_close_with_queued_upload() {
+static void test_fin_acked_after_server_eof_with_queued_upload() {
   test_ctx_t ctx;
   test_setup(&ctx);
 
-  server_close_while_queued(&ctx);
+  server_eof_with_queued_upload(&ctx);
   client_send(&ctx, TH_FIN | TH_ACK, NULL, 0);
+
+  assert(ctx.num_closes == 0);
+
+  send_eagain_count = 0;
+  process_events(&ctx);
 
   assert(ctx.last_ack == ctx.client_seq);
   assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 0);
+  assert(server_received_payload(&ctx));
 
   test_teardown(&ctx);
 }
 
 /* ******************************************************* */
 
-static void test_data_acked_after_server_close_with_queued_upload() {
+static void test_data_queued_after_server_eof_with_queued_upload() {
   test_ctx_t ctx;
   test_setup(&ctx);
 
-  server_close_while_queued(&ctx);
+  server_eof_with_queued_upload(&ctx);
   client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+
+  send_eagain_count = 0;
+  process_events(&ctx);
 
   assert(ctx.last_ack == ctx.client_seq);
   assert(ctx.num_closes == 0);
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// The upload cannot be delivered, so the client must be told (RFC 9293 3.6.1)
+static void test_rst_on_send_error_after_server_eof() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  server_eof(&ctx);
+
+  send_errno = EPIPE;
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 1);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// The EOF of a fully closed server looks like a half close. The server
+// replies to the upload with a RST, which fails the next send
+static void test_rst_after_upload_to_closed_server() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  // Like PCAPdroid, as the send would raise SIGPIPE
+  signal(SIGPIPE, SIG_IGN);
+
+  close_server_socket(&ctx);
+
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(ctx.num_closes == 0);
+
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 1);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_rst_on_idle_timeout_after_server_eof() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  server_eof(&ctx);
+
+  fake_now += 61;
+  zdtun_purge_expired(ctx.tun);
+
+  assert(zdtun_get_num_connections(ctx.tun) == 0);
+  assert(ctx.num_rsts == 1);
 
   test_teardown(&ctx);
 }
@@ -937,17 +1093,22 @@ static const test_t tests[] = {
   {"upload_sent_while_server_sending", test_upload_sent_while_server_sending},
   {"close_completed_while_server_sending", test_close_completed_while_server_sending},
   {"drain_completed_with_server_eof", test_drain_completed_with_server_eof},
-  {"queued_upload_not_sent_after_server_close", test_queued_upload_not_sent_after_server_close},
+  {"queued_upload_sent_after_server_eof", test_queued_upload_sent_after_server_eof},
+  {"upload_delivered_after_server_half_close", test_upload_delivered_after_server_half_close},
+  {"fin_propagated_after_server_half_close", test_fin_propagated_after_server_half_close},
   {"fin_terminates_when_server_closed", test_fin_terminates_when_server_closed},
-  {"fin_payload_acked_when_server_closed", test_fin_payload_acked_when_server_closed},
+  {"fin_payload_delivered_after_server_eof", test_fin_payload_delivered_after_server_eof},
   {"fin_payload_retransmission_after_close", test_fin_payload_retransmission_after_close},
   {"fin_payload_retransmission_seq_wrap", test_fin_payload_retransmission_seq_wrap},
   {"fin_payload_retransmission_while_queued", test_fin_payload_retransmission_while_queued},
   {"non_fin_ignored_at_fin_payload_seq", test_non_fin_ignored_at_fin_payload_seq},
-  {"queued_upload_acked_when_server_closes", test_queued_upload_acked_when_server_closes},
-  {"partially_sent_upload_acked_when_server_closes", test_partially_sent_upload_acked_when_server_closes},
-  {"fin_acked_after_server_close_with_queued_upload", test_fin_acked_after_server_close_with_queued_upload},
-  {"data_acked_after_server_close_with_queued_upload", test_data_acked_after_server_close_with_queued_upload},
+  {"queued_upload_not_acked_at_server_eof", test_queued_upload_not_acked_at_server_eof},
+  {"partially_sent_upload_delivered_after_server_eof", test_partially_sent_upload_delivered_after_server_eof},
+  {"fin_acked_after_server_eof_with_queued_upload", test_fin_acked_after_server_eof_with_queued_upload},
+  {"data_queued_after_server_eof_with_queued_upload", test_data_queued_after_server_eof_with_queued_upload},
+  {"rst_on_send_error_after_server_eof", test_rst_on_send_error_after_server_eof},
+  {"rst_after_upload_to_closed_server", test_rst_after_upload_to_closed_server},
+  {"rst_on_idle_timeout_after_server_eof", test_rst_on_idle_timeout_after_server_eof},
   {"window_update_applied_by_fin", test_window_update_applied_by_fin},
   {"window_update_applied_by_fin_retransmission", test_window_update_applied_by_fin_retransmission},
   {"server_eof_not_polled_after_fin_retransmission", test_server_eof_not_polled_after_fin_retransmission},

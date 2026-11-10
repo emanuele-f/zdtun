@@ -898,6 +898,38 @@ static void test_zero_window_syn_socks5_handshake() {
 
 /* ******************************************************* */
 
+// The client is still waiting for the SYN+ACK, so it only accepts a RST
+static void test_socks5_server_close_during_handshake() {
+  test_ctx_t ctx;
+  zdtun_ip_t proxy_ip = {0};
+  char rx[16];
+
+  test_init(&ctx, on_send_client);
+
+  proxy_ip.ip4 = inet_addr(SERVER_IP);
+  zdtun_set_socks5_proxy(ctx.tun, &proxy_ip, htons(ctx.server_port), 4);
+  zdtun_conn_proxy(lookup_client_conn(&ctx, 1));
+
+  client_syn_with_window(&ctx, CLIENT_WINDOW);
+  accept_server_sock(&ctx);
+
+  // Completes the connect, if in progress
+  poll_events(&ctx);
+
+  assert(recv(ctx.server_sock, rx, sizeof(rx), 0) == 3);
+  close_server_socket(&ctx);
+
+  assert(!ctx.syn_ack_received);
+  assert(ctx.num_rsts == 1);
+  assert(ctx.last_ack == (CLIENT_ISN + 1));
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_SOCKS5_ERROR);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 // Sends a SYN with the Window Scale option, then waits for the SYN+ACK
 static void connect_with_window_scale(test_ctx_t *ctx, uint16_t window, uint8_t scale) {
   uint8_t opts[] = {
@@ -1174,18 +1206,21 @@ static void test_retransmitted_byte_with_fin_delivered_once() {
 
 /* ******************************************************* */
 
-static void test_retransmitted_byte_acked_once_after_server_close() {
+static void test_retransmitted_byte_delivered_once_after_server_eof() {
   test_ctx_t ctx;
 
   test_setup_with_mss(&ctx, PAYLOAD_SIZE);
 
-  close_server_socket(&ctx);
+  // The server half closes the connection, but keeps reading
+  assert(shutdown(ctx.server_sock, SHUT_WR) == 0);
+  process_events(&ctx);
 
   assert(ctx.num_server_fins == 1);
 
   uint32_t data_seq = ctx.client_seq;
 
   client_send(&ctx, TH_ACK | TH_PUSH, stream, 1);
+  process_events(&ctx);
 
   assert(ctx.last_ack == ctx.client_seq);
 
@@ -1194,9 +1229,11 @@ static void test_retransmitted_byte_acked_once_after_server_close() {
   assert(ctx.last_ack == ctx.client_seq);
 
   client_send(&ctx, TH_ACK | TH_PUSH, stream + 1, PAYLOAD_SIZE - 1);
+  process_events(&ctx);
 
   assert(ctx.last_ack == ctx.client_seq);
   assert(ctx.num_closes == 0);
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
 
   test_teardown(&ctx);
 }
@@ -1458,6 +1495,7 @@ static const test_t tests[] = {
   {"stale_read_event_with_zero_window", test_stale_read_event_with_zero_window},
   {"zero_window_upload_delivered", test_zero_window_upload_delivered},
   {"zero_window_syn_socks5_handshake", test_zero_window_syn_socks5_handshake},
+  {"socks5_server_close_during_handshake", test_socks5_server_close_during_handshake},
   {"large_window_scale_clamped", test_large_window_scale_clamped},
   {"syn_window_not_scaled", test_syn_window_not_scaled},
   {"syn_ack_window_not_scaled", test_syn_ack_window_not_scaled},
@@ -1467,7 +1505,7 @@ static const test_t tests[] = {
   {"server_reset_before_connect_handled", test_server_reset_before_connect_handled},
   {"retransmitted_byte_delivered_once", test_retransmitted_byte_delivered_once},
   {"retransmitted_byte_with_fin_delivered_once", test_retransmitted_byte_with_fin_delivered_once},
-  {"retransmitted_byte_acked_once_after_server_close", test_retransmitted_byte_acked_once_after_server_close},
+  {"retransmitted_byte_delivered_once_after_server_eof", test_retransmitted_byte_delivered_once_after_server_eof},
   {"ipv6_client_tcp_dnat_to_ipv4", test_ipv6_client_tcp_dnat_to_ipv4},
   {"ipv6_client_udp_dnat_to_ipv4", test_ipv6_client_udp_dnat_to_ipv4},
   {"ipv6_udp_zero_checksum_not_sent", test_ipv6_udp_zero_checksum_not_sent},
