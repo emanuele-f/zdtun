@@ -122,6 +122,7 @@ typedef struct zdtun_conn {
         uint8_t syn_received:1;
         uint8_t fin_ack_sent:1;
         uint8_t client_closed:1;
+        uint8_t client_reset:1;
       };
     } tcp;
   };
@@ -679,11 +680,12 @@ void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t stat
   // Must be set before sending the RST, as a send_client failure closes the connection again
   conn->status = (status >= CONN_STATUS_CLOSED) ? status : CONN_STATUS_CLOSED;
 
-  // Without a SYN, the client has no connection to reset. No RST is needed after
+  // Without a SYN, or after a client RST, the client has no connection to reset
+  // (a RST is never sent in reply to a RST, RFC 9293 3.10.7.4). No RST is needed after
   // a graceful close: both FINs sent and all the client data delivered. A server
   // FIN alone is a half close, so the client must be told when its data is lost
   if((conn->tuple.ipproto == IPPROTO_TCP) && conn->tcp.syn_received
-      && (status != CONN_STATUS_CLIENT_ERROR)
+      && !conn->tcp.client_reset && (status != CONN_STATUS_CLIENT_ERROR)
       && !(conn->tcp.fin_ack_sent && conn->tcp.client_closed && !conn->tcp.tx_queue)) {
     // Send TCP RST
     build_reply_tcpip(tun, conn, TH_RST | TH_ACK, 0, 0);
@@ -1398,6 +1400,8 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
   if(data->th_flags & TH_RST) {
     debug("Got TCP reset from client");
+
+    conn->tcp.client_reset = 1;
     zdtun_conn_close(tun, conn, CONN_STATUS_CLOSED);
 
     return 0;

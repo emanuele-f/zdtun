@@ -487,7 +487,40 @@ static void test_rst_after_fin_while_queued() {
   client_send(&ctx, TH_RST | TH_ACK, NULL, 0);
 
   assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 0);
   assert(server_read(&ctx, received, sizeof(received)) == 0);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// A RST is never sent in reply to a RST (RFC 9293 3.10.7.4)
+static void test_no_rst_reply_to_client_rst() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  client_send(&ctx, TH_RST | TH_ACK, NULL, 0);
+
+  assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 0);
+
+  test_teardown(&ctx);
+
+  assert(ctx.num_rsts == 0);
+}
+
+/* ******************************************************* */
+
+static void test_no_rst_reply_to_client_rst_after_server_eof() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  server_eof(&ctx);
+  client_send(&ctx, TH_RST | TH_ACK, NULL, 0);
+
+  assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 0);
 
   test_teardown(&ctx);
 }
@@ -1083,6 +1116,8 @@ static const test_t tests[] = {
   {"drain_progress_refreshes_idle_timeout", test_drain_progress_refreshes_idle_timeout},
   {"window_update_applied_while_queued", test_window_update_applied_while_queued},
   {"rst_after_fin_while_queued", test_rst_after_fin_while_queued},
+  {"no_rst_reply_to_client_rst", test_no_rst_reply_to_client_rst},
+  {"no_rst_reply_to_client_rst_after_server_eof", test_no_rst_reply_to_client_rst_after_server_eof},
   {"server_eof_keeps_connection_while_queued", test_server_eof_keeps_connection_while_queued},
   {"upload_delivered_after_server_eof", test_upload_delivered_after_server_eof},
   {"fin_acked_after_server_eof", test_fin_acked_after_server_eof},

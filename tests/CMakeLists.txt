@@ -35,6 +35,8 @@ set(TCP_CLOSE_TESTS
   drain_progress_refreshes_idle_timeout
   window_update_applied_while_queued
   rst_after_fin_while_queued
+  no_rst_reply_to_client_rst
+  no_rst_reply_to_client_rst_after_server_eof
   server_eof_keeps_connection_while_queued
   upload_delivered_after_server_eof
   fin_acked_after_server_eof
