@@ -50,6 +50,11 @@
 #define MAX_TCP_OPTIONS_LEN 40
 #define TCP_OPT_MSS 2
 #define TCP_OPT_MSS_LEN 4
+#define TCP_OPT_END 0
+#define TCP_OPT_NOP 1
+#define TCP_OPT_WSCALE 3
+#define TCP_OPT_WSCALE_LEN 3
+#define MAX_WINDOW_SCALE 14
 #define DEFAULT_MTU 1500
 #define PAYLOAD_SIZE 1000
 #define STREAM_SIZE 200000
@@ -65,11 +70,14 @@ typedef struct {
   zdtun_ip_t server_ip;
   int listen_sock;
   int server_sock;
+  int zdtun_sock;
   uint16_t server_port;
   uint32_t client_seq;
   uint32_t server_seq;
   uint32_t last_ack;
   uint16_t client_window;
+  uint16_t syn_ack_window;
+  int syn_ack_wscale;
   int num_server_fins;
   int max_pkt_len;
   int rx_len;
@@ -147,6 +155,37 @@ static void verify_reply(test_ctx_t *ctx, zdtun_pkt_t *pkt) {
 
 /* ******************************************************* */
 
+// Returns the Window Scale option of the segment, -1 if missing
+static int tcp_window_scale_opt(const struct tcphdr *tcp) {
+  const uint8_t *opts = (const uint8_t*) tcp + sizeof(*tcp);
+  int optslen = tcp->th_off * 4 - sizeof(*tcp);
+
+  while(optslen > 0) {
+    uint8_t kind = opts[0];
+
+    if(kind == TCP_OPT_END)
+      break;
+
+    if(kind == TCP_OPT_NOP) {
+      opts++;
+      optslen--;
+      continue;
+    }
+
+    assert((optslen >= 2) && (opts[1] >= 2) && (opts[1] <= optslen));
+
+    if((kind == TCP_OPT_WSCALE) && (opts[1] == TCP_OPT_WSCALE_LEN))
+      return opts[2];
+
+    optslen -= opts[1];
+    opts += opts[1];
+  }
+
+  return -1;
+}
+
+/* ******************************************************* */
+
 static void store_client_rx(test_ctx_t *ctx, zdtun_pkt_t *pkt) {
   assert((ctx->rx_len + pkt->l7_len) <= STREAM_SIZE);
   memcpy(client_rx + ctx->rx_len, pkt->l7, pkt->l7_len);
@@ -189,6 +228,8 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
   if(pkt->tcp->th_flags & TH_SYN) {
     ctx->syn_ack_received = 1;
     ctx->server_seq = ntohl(pkt->tcp->th_seq) + 1;
+    ctx->syn_ack_window = ntohs(pkt->tcp->th_win);
+    ctx->syn_ack_wscale = tcp_window_scale_opt(pkt->tcp);
   } else {
     store_client_rx(ctx, pkt);
     ctx->server_seq += pkt->l7_len;
@@ -200,6 +241,14 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
   }
 
   return 0;
+}
+
+/* ******************************************************* */
+
+static void on_socket_open(zdtun_t *tun, socket_t sock) {
+  test_ctx_t *ctx = (test_ctx_t*) zdtun_userdata(tun);
+
+  ctx->zdtun_sock = sock;
 }
 
 /* ******************************************************* */
@@ -390,6 +439,7 @@ static void open_listen_socket(test_ctx_t *ctx) {
 static void test_init(test_ctx_t *ctx) {
   static zdtun_callbacks_t callbacks = {
     .send_client = on_send_client,
+    .on_socket_open = on_socket_open,
     .on_connection_close = on_connection_close,
   };
 
@@ -978,6 +1028,105 @@ static void test_zero_window_syn_socks5_handshake() {
 
 /* ******************************************************* */
 
+// Sends a SYN with the Window Scale option, then waits for the SYN+ACK
+static void connect_with_window_scale(test_ctx_t *ctx, uint16_t window, uint8_t scale) {
+  uint8_t opts[] = {
+    TCP_OPT_MSS, TCP_OPT_MSS_LEN, 0xFF, 0xFF,
+    TCP_OPT_NOP, TCP_OPT_WSCALE, TCP_OPT_WSCALE_LEN, scale,
+  };
+
+  ctx->client_seq = CLIENT_ISN;
+  ctx->client_window = window;
+  client_send(ctx, TH_SYN, opts, sizeof(opts), NULL, 0);
+
+  while(!ctx->syn_ack_received)
+    process_events(ctx);
+
+  accept_server_sock(ctx);
+}
+
+/* ******************************************************* */
+
+static void test_large_window_scale_clamped() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  connect_with_window_scale(&ctx, 1, 200);
+
+  // The scale advertised by zdtun is independent, it only has to be valid
+  assert((ctx.syn_ack_wscale >= 0) && (ctx.syn_ack_wscale <= MAX_WINDOW_SCALE));
+
+  // The client window must be interpreted with a shift of 14 (RFC 7323 2.3)
+  client_ack(&ctx);
+  server_send(&ctx, 20 * PAYLOAD_SIZE);
+
+  for(int i = 0; i < 32; i++)
+    poll_events(&ctx);
+
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == (1 << MAX_WINDOW_SCALE));
+
+  assert_data_flows_after_window_update(&ctx, 20 * PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_syn_window_not_scaled() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  connect_with_window_scale(&ctx, PAYLOAD_SIZE, 7);
+  server_send(&ctx, 5 * PAYLOAD_SIZE);
+
+  poll_events(&ctx);
+  poll_events(&ctx);
+
+  // Until the client ACKs the SYN+ACK, only the SYN window can be used
+  assert_connection_alive(&ctx);
+  assert(ctx.rx_len == PAYLOAD_SIZE);
+
+  assert_data_flows_after_window_update(&ctx, 5 * PAYLOAD_SIZE);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_syn_ack_window_not_scaled() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  connect_with_window_scale(&ctx, CLIENT_WINDOW, 7);
+  assert(ctx.syn_ack_wscale == 7);
+
+  // Nothing has been sent yet, so the whole send buffer is available
+  int sndbuf = 0;
+  socklen_t len = sizeof(sndbuf);
+
+  assert(getsockopt(ctx.zdtun_sock, SOL_SOCKET, SO_SNDBUF, &sndbuf, &len) == 0);
+  assert(ctx.syn_ack_window == ((sndbuf < 0xFFFF) ? sndbuf : 0xFFFF));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_window_scale_not_sent_unsolicited() {
+  test_ctx_t ctx;
+  test_setup_with_mss(&ctx, PAYLOAD_SIZE);
+
+  assert(ctx.syn_ack_wscale == -1);
+
+  transfer_stream(&ctx, PAYLOAD_SIZE);
+  assert(client_received_stream(&ctx, PAYLOAD_SIZE));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 // Waits for the socket to become readable, so that the server data or EOF is
 // already there when zdtun handles the connect completion
 static void process_events_when_readable(test_ctx_t *ctx) {
@@ -1399,6 +1548,10 @@ static const test_t tests[] = {
   {"stale_read_event_with_zero_window", test_stale_read_event_with_zero_window},
   {"zero_window_upload_delivered", test_zero_window_upload_delivered},
   {"zero_window_syn_socks5_handshake", test_zero_window_syn_socks5_handshake},
+  {"large_window_scale_clamped", test_large_window_scale_clamped},
+  {"syn_window_not_scaled", test_syn_window_not_scaled},
+  {"syn_ack_window_not_scaled", test_syn_ack_window_not_scaled},
+  {"window_scale_not_sent_unsolicited", test_window_scale_not_sent_unsolicited},
   {"server_data_before_connect_handled", test_server_data_before_connect_handled},
   {"server_eof_before_connect_handled", test_server_eof_before_connect_handled},
   {"server_reset_before_connect_handled", test_server_reset_before_connect_handled},

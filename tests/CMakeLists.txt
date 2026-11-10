@@ -89,6 +89,10 @@ set(STACK_TESTS
   stale_read_event_with_zero_window
   zero_window_upload_delivered
   zero_window_syn_socks5_handshake
+  large_window_scale_clamped
+  syn_window_not_scaled
+  syn_ack_window_not_scaled
+  window_scale_not_sent_unsolicited
   server_data_before_connect_handled
   server_eof_before_connect_handled
   server_reset_before_connect_handled

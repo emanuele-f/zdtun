@@ -30,6 +30,7 @@
 #define REPLY_BUF_SIZE 65535
 #define DEFAULT_TCP_WINDOW 65535
 #define TCP_HEADER_LEN 20
+#define MAX_TCP_WINDOW_SCALE 14
 #define IPV4_HEADER_LEN 20
 #define IPV6_HEADER_LEN 40
 #define UDP_HEADER_LEN 8
@@ -603,7 +604,10 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   int iphdr_len = zdtun_iphdr_len(tun, conn);
   const u_int16_t l3_len = l4_len + TCP_HEADER_LEN + (optsoff * 4);
   struct tcphdr *tcp = (struct tcphdr *)&tun->reply_buf[iphdr_len];
-  uint32_t max_win = ((uint32_t)0xFFFF) << conn->tcp.window_scale;
+
+  // The window of a SYN is never scaled (RFC 7323 2.2)
+  uint8_t window_scale = (flags & TH_SYN) ? 0 : conn->tcp.window_scale;
+  uint32_t max_win = ((uint32_t)0xFFFF) << window_scale;
   uint32_t tcpwin;
 
   memset(tcp, 0, TCP_HEADER_LEN);
@@ -624,7 +628,7 @@ static void build_reply_tcpip(zdtun_t *tun, zdtun_conn_t *conn, u_int8_t flags,
   tcpwin = min(get_available_sndbuf(conn), max_win);
 #endif
 
-  tcp->th_win = htons(tcpwin >> conn->tcp.window_scale);
+  tcp->th_win = htons(tcpwin >> window_scale);
 
   zdtun_make_iphdr(tun, conn, tun->reply_buf, l3_len);
   tcp->th_sum = zdtun_l3_checksum(tun, conn, tun->reply_buf, (char*)tcp, l3_len);
@@ -720,6 +724,7 @@ static int send_syn_ack(zdtun_t *tun, zdtun_conn_t *conn) {
   int rv;
   int iphdr_len = zdtun_iphdr_len(tun, conn);
   uint8_t *opts = (uint8_t*) &tun->reply_buf[iphdr_len + TCP_HEADER_LEN];
+  uint8_t optslen = 4;
 
   // MSS option
   *(opts++) = 2;
@@ -727,17 +732,21 @@ static int send_syn_ack(zdtun_t *tun, zdtun_conn_t *conn) {
   *((uint16_t*)opts) = htons(default_mss(tun, conn));
   opts += 2;
 
-  // Window Scale
-  *(opts++) = 3;
-  *(opts++) = 3;
-  *(opts++) = conn->tcp.window_scale;
+  // Only allowed if received in the SYN. Without it, the scale is 0 (RFC 7323 2.2)
+  if(conn->tcp.window_scale > 0) {
+    // Window Scale
+    *(opts++) = 3;
+    *(opts++) = 3;
+    *(opts++) = conn->tcp.window_scale;
 
-  // End, aligned to 32 bits
-  *(opts++) = 0;
+    // End, aligned to 32 bits
+    *(opts++) = 0;
+    optslen += 4;
+  }
 
-  build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0, 2 /* n. 32bit words*/);
+  build_reply_tcpip(tun, conn, TH_SYN | TH_ACK, 0, optslen / 4 /* n. 32bit words*/);
 
-  if((rv = send_to_client(tun, conn, TCP_HEADER_LEN + 8 /* opts length */)) == 0) {
+  if((rv = send_to_client(tun, conn, TCP_HEADER_LEN + optslen)) == 0) {
     conn->tcp.zdtun_seq += 1;
 
     // the client may have advertised a zero window in the SYN
@@ -1306,7 +1315,7 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
       }
 
       if((kind == 3) && (len == 3)) // Window Scale
-        scale = *opts;
+        scale = min(*opts, MAX_TCP_WINDOW_SCALE); // RFC 7323 2.3
 
       opts += (len - 2);
       optslen -= len;
@@ -1314,7 +1323,8 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
     debug("MSS: %d, scale: %d\n", mss, scale);
 
-    conn->tcp.window_size = ntohs(data->th_win) << scale;
+    // The window of a SYN is never scaled (RFC 7323 2.2)
+    conn->tcp.window_size = ntohs(data->th_win);
     conn->tcp.window_scale = scale;
     conn->tcp.mss = mss;
 
