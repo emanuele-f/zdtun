@@ -180,6 +180,12 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
   if(pkt->tcp->th_flags & TH_ACK)
     ctx->last_ack = ntohl(pkt->tcp->th_ack);
 
+  if(!(pkt->tcp->th_flags & (TH_SYN | TH_RST))) {
+    // The client is in SYN_SENT until the SYN+ACK
+    assert(ctx->syn_ack_received);
+    assert(ntohl(pkt->tcp->th_seq) == ctx->server_seq);
+  }
+
   if(pkt->tcp->th_flags & TH_SYN) {
     ctx->syn_ack_received = 1;
     ctx->server_seq = ntohl(pkt->tcp->th_seq) + 1;
@@ -972,6 +978,114 @@ static void test_zero_window_syn_socks5_handshake() {
 
 /* ******************************************************* */
 
+// Waits for the socket to become readable, so that the server data or EOF is
+// already there when zdtun handles the connect completion
+static void process_events_when_readable(test_ctx_t *ctx) {
+  fd_set rd_fds;
+  fd_set wr_fds;
+  int max_fd = 0;
+  struct timeval timeout = {.tv_sec = IO_TIMEOUT_SEC};
+
+  zdtun_fds(ctx->tun, &max_fd, &rd_fds, &wr_fds);
+  assert(select(max_fd + 1, &rd_fds, NULL, NULL, &timeout) == 1);
+
+  zdtun_fds(ctx->tun, &max_fd, &rd_fds, &wr_fds);
+  assert(select(max_fd + 1, &rd_fds, &wr_fds, NULL, &timeout) == 2);
+
+  zdtun_handle_fd(ctx->tun, &rd_fds, &wr_fds);
+}
+
+/* ******************************************************* */
+
+static void connect_in_progress(test_ctx_t *ctx) {
+  force_connect_in_progress = 1;
+  client_syn_with_window(ctx, CLIENT_WINDOW);
+  assert(!ctx->syn_ack_received);
+
+  accept_server_sock(ctx);
+}
+
+/* ******************************************************* */
+
+static void test_server_data_before_connect_handled() {
+  test_ctx_t ctx;
+
+  test_init(&ctx);
+  connect_in_progress(&ctx);
+  server_send(&ctx, PAYLOAD_SIZE);
+
+  process_events_when_readable(&ctx);
+
+  assert(ctx.syn_ack_received);
+  client_ack(&ctx);
+
+  while(ctx.rx_len < PAYLOAD_SIZE) {
+    process_events(&ctx);
+    client_ack(&ctx);
+  }
+
+  assert_connection_alive(&ctx);
+  assert(client_received_stream(&ctx, PAYLOAD_SIZE));
+  assert(ctx.last_ack == ctx.client_seq);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_server_eof_before_connect_handled() {
+  test_ctx_t ctx;
+
+  test_init(&ctx);
+  connect_in_progress(&ctx);
+
+  close(ctx.server_sock);
+  ctx.server_sock = -1;
+
+  process_events_when_readable(&ctx);
+
+  assert(ctx.syn_ack_received);
+  client_ack(&ctx);
+
+  while(ctx.num_server_fins == 0)
+    process_events(&ctx);
+
+  assert(ctx.num_server_fins == 1);
+  assert(ctx.rx_len == 0);
+  assert(ctx.num_rsts == 0);
+  assert(ctx.num_closes == 0);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_server_reset_before_connect_handled() {
+  test_ctx_t ctx;
+  struct linger linger = {.l_onoff = 1, .l_linger = 0};
+
+  test_init(&ctx);
+  connect_in_progress(&ctx);
+
+  zdtun_conn_t *conn = lookup_client_conn(&ctx, 0);
+
+  assert(setsockopt(ctx.server_sock, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger)) == 0);
+  close(ctx.server_sock);
+  ctx.server_sock = -1;
+
+  process_events_when_readable(&ctx);
+
+  assert(!ctx.syn_ack_received);
+  assert(ctx.num_rsts == 1);
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_RESET);
+  assert(zdtun_conn_get_error(conn) == ECONNRESET);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 static void client_retransmit(test_ctx_t *ctx, uint8_t flags, uint32_t seq, const char *data, int len) {
   uint32_t client_seq = ctx->client_seq;
 
@@ -1285,6 +1399,9 @@ static const test_t tests[] = {
   {"stale_read_event_with_zero_window", test_stale_read_event_with_zero_window},
   {"zero_window_upload_delivered", test_zero_window_upload_delivered},
   {"zero_window_syn_socks5_handshake", test_zero_window_syn_socks5_handshake},
+  {"server_data_before_connect_handled", test_server_data_before_connect_handled},
+  {"server_eof_before_connect_handled", test_server_eof_before_connect_handled},
+  {"server_reset_before_connect_handled", test_server_reset_before_connect_handled},
   {"retransmitted_byte_delivered_once", test_retransmitted_byte_delivered_once},
   {"retransmitted_byte_with_fin_delivered_once", test_retransmitted_byte_with_fin_delivered_once},
   {"retransmitted_byte_acked_once_after_server_close", test_retransmitted_byte_acked_once_after_server_close},

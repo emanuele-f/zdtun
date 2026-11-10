@@ -2040,7 +2040,10 @@ int zdtun_handle_fd(zdtun_t *tun, const fd_set *rd_fds, const fd_set *wr_fds) {
 
     // With a zero window, recv would return 0, which means that the server has
     // closed. This also covers a read event which precedes the window update.
-    if(FD_ISSET(conn->sock, rd_fds) && ((ipproto != IPPROTO_TCP) || (tcp_recv_size(conn) > 0))) {
+    // The server data or EOF can also precede the connect completion, which must
+    // be handled first. A failed connect is also reported as writable.
+    if(FD_ISSET(conn->sock, rd_fds) && ((ipproto != IPPROTO_TCP) ||
+        ((conn->status != CONN_STATUS_CONNECTING) && (tcp_recv_size(conn) > 0)))) {
       if(ipproto == IPPROTO_TCP)
         rv = handle_tcp_reply(tun, conn);
       else if(ipproto == IPPROTO_UDP)

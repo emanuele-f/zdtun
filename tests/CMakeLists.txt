@@ -89,6 +89,9 @@ set(STACK_TESTS
   stale_read_event_with_zero_window
   zero_window_upload_delivered
   zero_window_syn_socks5_handshake
+  server_data_before_connect_handled
+  server_eof_before_connect_handled
+  server_reset_before_connect_handled
   retransmitted_byte_delivered_once
   retransmitted_byte_with_fin_delivered_once
   retransmitted_byte_acked_once_after_server_close
