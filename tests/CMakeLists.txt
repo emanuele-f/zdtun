@@ -92,6 +92,9 @@ set(STACK_TESTS
   retransmitted_byte_delivered_once
   retransmitted_byte_with_fin_delivered_once
   retransmitted_byte_acked_once_after_server_close
+  ipv6_client_tcp_dnat_to_ipv4
+  ipv6_client_udp_dnat_to_ipv4
+  ipv6_client_ipv4_socks5_proxy
 )
 
 foreach(TEST_NAME ${STACK_TESTS})

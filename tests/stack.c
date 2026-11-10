@@ -40,10 +40,13 @@
 
 #define CLIENT_IP "10.0.0.2"
 #define SERVER_IP "127.0.0.1"
+#define CLIENT_IP6 "fd00::2"
+#define SERVER_IP6 "fd00::1"
 #define CLIENT_PORT 12345
 #define CLIENT_ISN 1000
 #define CLIENT_WINDOW 65535
 #define IPV4_TCP_HEADERS_LEN (sizeof(struct iphdr) + sizeof(struct tcphdr))
+#define MAX_TCP_HEADERS_LEN (sizeof(struct ipv6_hdr) + sizeof(struct tcphdr))
 #define MAX_TCP_OPTIONS_LEN 40
 #define TCP_OPT_MSS 2
 #define TCP_OPT_MSS_LEN 4
@@ -53,9 +56,13 @@
 #define IO_TIMEOUT_SEC 5
 #define POLL_TIMEOUT_USEC 100000
 #define SOCKS5_REQ_LEN 10
+#define SOCKS5_REQ6_LEN 22
 
 typedef struct {
   zdtun_t *tun;
+  uint8_t ipver;
+  zdtun_ip_t client_ip;
+  zdtun_ip_t server_ip;
   int listen_sock;
   int server_sock;
   uint16_t server_port;
@@ -95,9 +102,70 @@ int __wrap_connect(int sock, const struct sockaddr *addr, socklen_t addr_len) {
 
 /* ******************************************************* */
 
+static uint32_t checksum_add(uint32_t sum, const void *data, int len) {
+  const uint8_t *p = (const uint8_t*) data;
+
+  for(int i = 0; i < len; i++)
+    sum += (i & 1) ? p[i] : (p[i] << 8);
+
+  return sum;
+}
+
+/* ******************************************************* */
+
+// Verifies that the reply is addressed to the client and has a valid L4 checksum
+static void verify_reply(test_ctx_t *ctx, zdtun_pkt_t *pkt) {
+  uint16_t l4_len = pkt->len - pkt->ip_hdr_len;
+  uint8_t ipproto = pkt->tuple.ipproto;
+  uint8_t pseudo[4] = {0, ipproto, l4_len >> 8, l4_len & 0xFF};
+  uint32_t sum = 0;
+
+  assert(pkt->tuple.ipver == ctx->ipver);
+  assert(zdtun_cmp_ip(ctx->ipver, &pkt->tuple.src_ip, &ctx->server_ip) == 0);
+  assert(zdtun_cmp_ip(ctx->ipver, &pkt->tuple.dst_ip, &ctx->client_ip) == 0);
+
+  // the UDP checksum is optional on IPv4
+  if((ipproto == IPPROTO_UDP) && (ctx->ipver == 4) && (pkt->udp->uh_sum == 0))
+    return;
+
+  if(ctx->ipver == 4) {
+    sum = checksum_add(sum, &pkt->ip4->saddr, 4);
+    sum = checksum_add(sum, &pkt->ip4->daddr, 4);
+  } else {
+    sum = checksum_add(sum, &pkt->ip6->saddr, 16);
+    sum = checksum_add(sum, &pkt->ip6->daddr, 16);
+  }
+
+  sum = checksum_add(sum, pseudo, sizeof(pseudo));
+  sum = checksum_add(sum, pkt->l4, l4_len);
+
+  while(sum >> 16)
+    sum = (sum & 0xFFFF) + (sum >> 16);
+
+  assert(sum == 0xFFFF);
+}
+
+/* ******************************************************* */
+
+static void store_client_rx(test_ctx_t *ctx, zdtun_pkt_t *pkt) {
+  assert((ctx->rx_len + pkt->l7_len) <= STREAM_SIZE);
+  memcpy(client_rx + ctx->rx_len, pkt->l7, pkt->l7_len);
+
+  ctx->rx_len += pkt->l7_len;
+}
+
+/* ******************************************************* */
+
 // Captures the packets sent to the client
 static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *conn_info) {
   test_ctx_t *ctx = (test_ctx_t*) zdtun_userdata(tun);
+
+  verify_reply(ctx, pkt);
+
+  if(pkt->tuple.ipproto == IPPROTO_UDP) {
+    store_client_rx(ctx, pkt);
+    return 0;
+  }
 
   if(pkt->tcp->th_flags & TH_RST) {
     ctx->num_rsts++;
@@ -116,10 +184,7 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
     ctx->syn_ack_received = 1;
     ctx->server_seq = ntohl(pkt->tcp->th_seq) + 1;
   } else {
-    assert((ctx->rx_len + pkt->l7_len) <= STREAM_SIZE);
-    memcpy(client_rx + ctx->rx_len, pkt->l7, pkt->l7_len);
-
-    ctx->rx_len += pkt->l7_len;
+    store_client_rx(ctx, pkt);
     ctx->server_seq += pkt->l7_len;
   }
 
@@ -142,26 +207,52 @@ static void on_connection_close(zdtun_t *tun, const zdtun_conn_t *conn_info) {
 
 /* ******************************************************* */
 
+// Writes the IP header of a client packet, returning its length
+static int client_iphdr(test_ctx_t *ctx, char *buf, uint8_t ipproto, int l4_len) {
+  if(ctx->ipver == 4) {
+    struct iphdr *ip = (struct iphdr*) buf;
+
+    memset(ip, 0, sizeof(*ip));
+    ip->version = 4;
+    ip->ihl = 5;
+    ip->tot_len = htons(sizeof(*ip) + l4_len);
+    ip->ttl = 64;
+    ip->protocol = ipproto;
+    ip->saddr = ctx->client_ip.ip4;
+    ip->daddr = ctx->server_ip.ip4;
+
+    return sizeof(*ip);
+  } else {
+    struct ipv6_hdr *ip = (struct ipv6_hdr*) buf;
+
+    memset(ip, 0, sizeof(*ip));
+    ip->version = 6;
+    ip->payload_len = htons(l4_len);
+    ip->nexthdr = ipproto;
+    ip->hop_limit = 64;
+    ip->saddr = ctx->client_ip.ip6;
+    ip->daddr = ctx->server_ip.ip6;
+
+    return sizeof(*ip);
+  }
+}
+
+/* ******************************************************* */
+
 static void client_send(test_ctx_t *ctx, uint8_t flags, const uint8_t *opts, int opts_len,
         const char *data, int len) {
-  static char buf[IPV4_TCP_HEADERS_LEN + MAX_TCP_OPTIONS_LEN + PAYLOAD_SIZE] __attribute__((aligned(4)));
-  struct iphdr *ip = (struct iphdr*) buf;
-  struct tcphdr *tcp = (struct tcphdr*) (buf + sizeof(struct iphdr));
-  int pkt_len = IPV4_TCP_HEADERS_LEN + opts_len + len;
+  static char buf[MAX_TCP_HEADERS_LEN + MAX_TCP_OPTIONS_LEN + PAYLOAD_SIZE] __attribute__((aligned(4)));
+  int l4_len = sizeof(struct tcphdr) + opts_len + len;
 
   assert((opts_len % 4) == 0);
   assert(opts_len <= MAX_TCP_OPTIONS_LEN);
   assert(len <= PAYLOAD_SIZE);
 
-  memset(buf, 0, IPV4_TCP_HEADERS_LEN);
+  int iphdr_len = client_iphdr(ctx, buf, IPPROTO_TCP, l4_len);
+  struct tcphdr *tcp = (struct tcphdr*) (buf + iphdr_len);
+  int pkt_len = iphdr_len + l4_len;
 
-  ip->version = 4;
-  ip->ihl = 5;
-  ip->tot_len = htons(pkt_len);
-  ip->ttl = 64;
-  ip->protocol = IPPROTO_TCP;
-  ip->saddr = inet_addr(CLIENT_IP);
-  ip->daddr = inet_addr(SERVER_IP);
+  memset(tcp, 0, sizeof(*tcp));
 
   tcp->th_sport = htons(CLIENT_PORT);
   tcp->th_dport = htons(ctx->server_port);
@@ -172,10 +263,10 @@ static void client_send(test_ctx_t *ctx, uint8_t flags, const uint8_t *opts, int
   tcp->th_win = htons(ctx->client_window);
 
   if(opts_len > 0)
-    memcpy(buf + IPV4_TCP_HEADERS_LEN, opts, opts_len);
+    memcpy(buf + iphdr_len + sizeof(struct tcphdr), opts, opts_len);
 
   if(len > 0)
-    memcpy(buf + IPV4_TCP_HEADERS_LEN + opts_len, data, len);
+    memcpy(buf + iphdr_len + sizeof(struct tcphdr) + opts_len, data, len);
 
   assert(zdtun_easy_forward(ctx->tun, buf, pkt_len) != NULL);
 
@@ -297,6 +388,10 @@ static void test_init(test_ctx_t *ctx) {
   };
 
   memset(ctx, 0, sizeof(*ctx));
+
+  ctx->ipver = 4;
+  ctx->client_ip.ip4 = inet_addr(CLIENT_IP);
+  ctx->server_ip.ip4 = inet_addr(SERVER_IP);
 
   for(int i = 0; i < STREAM_SIZE; i++)
     stream[i] = (char) (i % 251);
@@ -980,6 +1075,192 @@ static void test_retransmitted_byte_acked_once_after_server_close() {
 
 /* ******************************************************* */
 
+static void test_init_ipv6(test_ctx_t *ctx) {
+  test_init(ctx);
+
+  ctx->ipver = 6;
+  assert(inet_pton(AF_INET6, CLIENT_IP6, &ctx->client_ip.ip6) == 1);
+  assert(inet_pton(AF_INET6, SERVER_IP6, &ctx->server_ip.ip6) == 1);
+}
+
+/* ******************************************************* */
+
+static zdtun_conn_t* create_client_conn(test_ctx_t *ctx, uint8_t ipproto) {
+  zdtun_5tuple_t tuple;
+
+  memset(&tuple, 0, sizeof(tuple));
+  tuple.src_ip = ctx->client_ip;
+  tuple.dst_ip = ctx->server_ip;
+  tuple.src_port = htons(CLIENT_PORT);
+  tuple.dst_port = htons(ctx->server_port);
+  tuple.ipver = ctx->ipver;
+  tuple.ipproto = ipproto;
+
+  zdtun_conn_t *conn = zdtun_lookup(ctx->tun, &tuple, 1);
+  assert(conn != NULL);
+
+  return conn;
+}
+
+/* ******************************************************* */
+
+static void dnat_to_ipv4_server(test_ctx_t *ctx, uint8_t ipproto) {
+  zdtun_ip_t server_ip = {0};
+
+  server_ip.ip4 = inet_addr(SERVER_IP);
+  zdtun_conn_dnat(create_client_conn(ctx, ipproto), &server_ip, htons(ctx->server_port), 4);
+}
+
+/* ******************************************************* */
+
+static void assert_upload_delivered(test_ctx_t *ctx) {
+  char rx[PAYLOAD_SIZE];
+
+  client_send(ctx, TH_ACK | TH_PUSH, NULL, 0, stream, PAYLOAD_SIZE);
+  process_events(ctx);
+
+  assert(ctx->last_ack == ctx->client_seq);
+  assert(recv(ctx->server_sock, rx, PAYLOAD_SIZE, MSG_WAITALL) == PAYLOAD_SIZE);
+  assert(memcmp(rx, stream, PAYLOAD_SIZE) == 0);
+}
+
+/* ******************************************************* */
+
+static void test_ipv6_client_tcp_dnat_to_ipv4() {
+  test_ctx_t ctx;
+
+  test_init_ipv6(&ctx);
+  dnat_to_ipv4_server(&ctx, IPPROTO_TCP);
+  test_connect_with_mss(&ctx, 65535);
+
+  transfer_stream(&ctx, STREAM_SIZE);
+
+  assert(ctx.max_pkt_len <= DEFAULT_MTU);
+  assert(client_received_stream(&ctx, STREAM_SIZE));
+
+  assert_upload_delivered(&ctx);
+  assert_connection_alive(&ctx);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void open_udp_server(test_ctx_t *ctx) {
+  struct sockaddr_in addr = {0};
+  socklen_t addr_len = sizeof(addr);
+
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = inet_addr(SERVER_IP);
+
+  ctx->server_sock = socket(AF_INET, SOCK_DGRAM, 0);
+  assert(ctx->server_sock >= 0);
+
+  set_recv_timeout(ctx->server_sock);
+
+  assert(bind(ctx->server_sock, (struct sockaddr*) &addr, sizeof(addr)) == 0);
+  assert(getsockname(ctx->server_sock, (struct sockaddr*) &addr, &addr_len) == 0);
+
+  ctx->server_port = ntohs(addr.sin_port);
+}
+
+/* ******************************************************* */
+
+static void client_send_udp(test_ctx_t *ctx, const char *data, int len) {
+  static char buf[sizeof(struct ipv6_hdr) + sizeof(struct udphdr) + PAYLOAD_SIZE] __attribute__((aligned(4)));
+  int l4_len = sizeof(struct udphdr) + len;
+
+  assert(len <= PAYLOAD_SIZE);
+
+  int iphdr_len = client_iphdr(ctx, buf, IPPROTO_UDP, l4_len);
+  struct udphdr *udp = (struct udphdr*) (buf + iphdr_len);
+
+  udp->uh_sport = htons(CLIENT_PORT);
+  udp->uh_dport = htons(ctx->server_port);
+  udp->uh_ulen = htons(l4_len);
+  udp->uh_sum = 0;
+
+  memcpy(buf + iphdr_len + sizeof(struct udphdr), data, len);
+
+  assert(zdtun_easy_forward(ctx->tun, buf, iphdr_len + l4_len) != NULL);
+}
+
+/* ******************************************************* */
+
+static void test_ipv6_client_udp_dnat_to_ipv4() {
+  test_ctx_t ctx;
+  char rx[PAYLOAD_SIZE];
+  struct sockaddr_in addr;
+  socklen_t addr_len = sizeof(addr);
+
+  test_init_ipv6(&ctx);
+  open_udp_server(&ctx);
+  dnat_to_ipv4_server(&ctx, IPPROTO_UDP);
+
+  client_send_udp(&ctx, stream, PAYLOAD_SIZE);
+
+  assert(recvfrom(ctx.server_sock, rx, sizeof(rx), 0, (struct sockaddr*) &addr, &addr_len) == PAYLOAD_SIZE);
+  assert(memcmp(rx, stream, PAYLOAD_SIZE) == 0);
+
+  assert(sendto(ctx.server_sock, stream, PAYLOAD_SIZE, 0, (struct sockaddr*) &addr, addr_len) == PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(client_received_stream(&ctx, PAYLOAD_SIZE));
+  assert(ctx.num_closes == 0);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_ipv6_client_ipv4_socks5_proxy() {
+  test_ctx_t ctx;
+  zdtun_ip_t proxy_ip = {0};
+  uint8_t rx[32];
+  const char srv_choice[] = {5, 0};
+  const char connect_reply[SOCKS5_REQ_LEN] = {5, 0, 0, 1};
+
+  test_init_ipv6(&ctx);
+
+  proxy_ip.ip4 = inet_addr(SERVER_IP);
+  zdtun_set_socks5_proxy(ctx.tun, &proxy_ip, htons(ctx.server_port), 4);
+  zdtun_conn_proxy(create_client_conn(&ctx, IPPROTO_TCP));
+
+  client_syn_with_window(&ctx, CLIENT_WINDOW);
+  accept_server_sock(&ctx);
+
+  // Completes the connect, if in progress
+  poll_events(&ctx);
+
+  assert(recv(ctx.server_sock, rx, sizeof(rx), 0) == 3);
+  assert(send(ctx.server_sock, srv_choice, sizeof(srv_choice), 0) == sizeof(srv_choice));
+  process_events(&ctx);
+
+  // The proxy must connect to the original IPv6 destination
+  assert(recv(ctx.server_sock, rx, sizeof(rx), 0) == SOCKS5_REQ6_LEN);
+  assert(rx[3] == 4);
+  assert(memcmp(rx + 4, &ctx.server_ip.ip6, 16) == 0);
+  assert(((rx[20] << 8) | rx[21]) == ctx.server_port);
+
+  assert(send(ctx.server_sock, connect_reply, sizeof(connect_reply), 0) == sizeof(connect_reply));
+  process_events(&ctx);
+
+  assert(ctx.syn_ack_received);
+  client_ack(&ctx);
+
+  transfer_stream(&ctx, STREAM_SIZE);
+
+  assert(ctx.max_pkt_len <= DEFAULT_MTU);
+  assert(client_received_stream(&ctx, STREAM_SIZE));
+
+  assert_upload_delivered(&ctx);
+  assert_connection_alive(&ctx);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 typedef struct {
   const char *name;
   void (*run)();
@@ -1007,6 +1288,9 @@ static const test_t tests[] = {
   {"retransmitted_byte_delivered_once", test_retransmitted_byte_delivered_once},
   {"retransmitted_byte_with_fin_delivered_once", test_retransmitted_byte_with_fin_delivered_once},
   {"retransmitted_byte_acked_once_after_server_close", test_retransmitted_byte_acked_once_after_server_close},
+  {"ipv6_client_tcp_dnat_to_ipv4", test_ipv6_client_tcp_dnat_to_ipv4},
+  {"ipv6_client_udp_dnat_to_ipv4", test_ipv6_client_udp_dnat_to_ipv4},
+  {"ipv6_client_ipv4_socks5_proxy", test_ipv6_client_ipv4_socks5_proxy},
 };
 
 /* ******************************************************* */
