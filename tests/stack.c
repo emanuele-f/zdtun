@@ -61,6 +61,7 @@ typedef struct {
   uint16_t server_port;
   uint32_t client_seq;
   uint32_t server_seq;
+  uint32_t last_ack;
   uint16_t client_window;
   int num_server_fins;
   int max_pkt_len;
@@ -107,6 +108,9 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
 
   if(pkt->len > ctx->max_pkt_len)
     ctx->max_pkt_len = pkt->len;
+
+  if(pkt->tcp->th_flags & TH_ACK)
+    ctx->last_ack = ntohl(pkt->tcp->th_ack);
 
   if(pkt->tcp->th_flags & TH_SYN) {
     ctx->syn_ack_received = 1;
@@ -873,6 +877,109 @@ static void test_zero_window_syn_socks5_handshake() {
 
 /* ******************************************************* */
 
+static void client_retransmit(test_ctx_t *ctx, uint8_t flags, uint32_t seq, const char *data, int len) {
+  uint32_t client_seq = ctx->client_seq;
+
+  ctx->client_seq = seq;
+  client_send(ctx, flags, NULL, 0, data, len);
+
+  if(!(flags & TH_FIN))
+    ctx->client_seq = client_seq;
+}
+
+/* ******************************************************* */
+
+static void test_retransmitted_byte_delivered_once() {
+  test_ctx_t ctx;
+  char rx[PAYLOAD_SIZE];
+
+  test_setup_with_mss(&ctx, PAYLOAD_SIZE);
+
+  uint32_t data_seq = ctx.client_seq;
+
+  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream, 1);
+  process_events(&ctx);
+
+  assert(ctx.last_ack == ctx.client_seq);
+
+  client_retransmit(&ctx, TH_ACK | TH_PUSH, data_seq, stream, 1);
+
+  assert(ctx.last_ack == ctx.client_seq);
+
+  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream + 1, PAYLOAD_SIZE - 1);
+  process_events(&ctx);
+
+  assert(ctx.last_ack == ctx.client_seq);
+
+  assert(recv(ctx.server_sock, rx, PAYLOAD_SIZE, MSG_WAITALL) == PAYLOAD_SIZE);
+  assert(memcmp(rx, stream, PAYLOAD_SIZE) == 0);
+  assert(recv(ctx.server_sock, rx, sizeof(rx), MSG_DONTWAIT) < 0);
+
+  assert_connection_alive(&ctx);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+// The FIN is new, while the byte is a retransmission
+static void test_retransmitted_byte_with_fin_delivered_once() {
+  test_ctx_t ctx;
+  char rx[2];
+
+  test_setup_with_mss(&ctx, PAYLOAD_SIZE);
+
+  uint32_t data_seq = ctx.client_seq;
+
+  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream, 1);
+  process_events(&ctx);
+
+  client_retransmit(&ctx, TH_FIN | TH_ACK | TH_PUSH, data_seq, stream, 1);
+
+  assert(ctx.client_seq == (data_seq + 2));
+  assert(ctx.last_ack == ctx.client_seq);
+
+  assert(recv(ctx.server_sock, rx, sizeof(rx), MSG_WAITALL) == 1);
+  assert(rx[0] == stream[0]);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_retransmitted_byte_acked_once_after_server_close() {
+  test_ctx_t ctx;
+
+  test_setup_with_mss(&ctx, PAYLOAD_SIZE);
+
+  close(ctx.server_sock);
+  ctx.server_sock = -1;
+
+  // zdtun reads the server EOF and closes its own socket
+  process_events(&ctx);
+
+  assert(ctx.num_server_fins == 1);
+
+  uint32_t data_seq = ctx.client_seq;
+
+  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream, 1);
+
+  assert(ctx.last_ack == ctx.client_seq);
+
+  client_retransmit(&ctx, TH_ACK | TH_PUSH, data_seq, stream, 1);
+
+  assert(ctx.last_ack == ctx.client_seq);
+
+  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream + 1, PAYLOAD_SIZE - 1);
+
+  assert(ctx.last_ack == ctx.client_seq);
+  assert(ctx.num_closes == 0);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 typedef struct {
   const char *name;
   void (*run)();
@@ -897,6 +1004,9 @@ static const test_t tests[] = {
   {"stale_read_event_with_zero_window", test_stale_read_event_with_zero_window},
   {"zero_window_upload_delivered", test_zero_window_upload_delivered},
   {"zero_window_syn_socks5_handshake", test_zero_window_syn_socks5_handshake},
+  {"retransmitted_byte_delivered_once", test_retransmitted_byte_delivered_once},
+  {"retransmitted_byte_with_fin_delivered_once", test_retransmitted_byte_with_fin_delivered_once},
+  {"retransmitted_byte_acked_once_after_server_close", test_retransmitted_byte_acked_once_after_server_close},
 };
 
 /* ******************************************************* */

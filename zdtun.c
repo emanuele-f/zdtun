@@ -1392,7 +1392,8 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
 
     conn->tcp.client_closed = 1;
 
-    if(pkt->l7_len > 0) {
+    // A keep-alive match is a retransmission of an already received byte
+    if((pkt->l7_len > 0) && !is_keep_alive) {
       if(conn->sock == INVALID_SOCKET)
         conn->tcp.client_seq += pkt->l7_len;
       else if(enqueue_tcp_data(tun, conn, pkt->l7, pkt->l7_len, data->th_flags | TH_PUSH) != 0)
@@ -1406,22 +1407,23 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     return finish_client_close(tun, conn);
   }
 
-  if((data->th_flags & TH_ACK) && (conn->sock != INVALID_SOCKET)) {
-    if(is_keep_alive) {
-      debug("TCP KEEPALIVE");
+  if(is_keep_alive) {
+    debug("TCP KEEPALIVE");
 
+    if(conn->sock != INVALID_SOCKET) {
       int val = 1;
       if(setsockopt(conn->sock, SOL_SOCKET, SO_KEEPALIVE, &val, sizeof(val)) != 0)
         error("setsockopt SO_KEEPALIVE failed[%d]: %s", errno, strerror(errno));
+    }
 
-      // Assume that the server is alive until its socket is closed.
-      build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
-
-      if(send_to_client(tun, conn, TCP_HEADER_LEN) != 0)
-        return -1;
-    } else
-      update_tcp_window(tun, conn, data);
+    // Assume that the server is alive until its socket is closed.
+    // The keep-alive byte, if any, was already received, so it is only ACKed.
+    build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
+    return send_to_client(tun, conn, TCP_HEADER_LEN);
   }
+
+  if((data->th_flags & TH_ACK) && (conn->sock != INVALID_SOCKET))
+    update_tcp_window(tun, conn, data);
 
   // check for payload data (avoid sending ACK to an ACK)
   if(pkt->l7_len > 0) {
