@@ -946,6 +946,52 @@ static void test_rst_after_upload_to_closed_server() {
 
 /* ******************************************************* */
 
+// The server replies to the upload with a RST. No send follows it, so the
+// RST must be detected on the client FIN, which must not close gracefully
+static void test_rst_after_fin_payload_to_closed_server() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  signal(SIGPIPE, SIG_IGN);
+
+  close_server_socket(&ctx);
+
+  client_send(&ctx, TH_FIN | TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_SOCKET_ERROR);
+  assert(ctx.num_rsts == 1);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_rst_after_fin_following_upload_to_closed_server() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  signal(SIGPIPE, SIG_IGN);
+
+  close_server_socket(&ctx);
+
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(ctx.num_closes == 0);
+
+  client_send(&ctx, TH_FIN | TH_ACK, NULL, 0);
+
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_SOCKET_ERROR);
+  assert(ctx.num_rsts == 1);
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
 static void test_rst_on_idle_timeout_after_server_eof() {
   test_ctx_t ctx;
   test_setup(&ctx);
@@ -1236,6 +1282,8 @@ static const test_t tests[] = {
   {"data_queued_after_server_eof_with_queued_upload", test_data_queued_after_server_eof_with_queued_upload},
   {"rst_on_send_error_after_server_eof", test_rst_on_send_error_after_server_eof},
   {"rst_after_upload_to_closed_server", test_rst_after_upload_to_closed_server},
+  {"rst_after_fin_payload_to_closed_server", test_rst_after_fin_payload_to_closed_server},
+  {"rst_after_fin_following_upload_to_closed_server", test_rst_after_fin_following_upload_to_closed_server},
   {"rst_on_idle_timeout_after_server_eof", test_rst_on_idle_timeout_after_server_eof},
   {"window_update_applied_by_fin", test_window_update_applied_by_fin},
   {"window_update_applied_by_fin_retransmission", test_window_update_applied_by_fin_retransmission},

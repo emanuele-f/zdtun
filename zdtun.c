@@ -683,10 +683,12 @@ void zdtun_conn_close(zdtun_t *tun, zdtun_conn_t *conn, zdtun_conn_status_t stat
   // Without a SYN, or after a client RST, the client has no connection to reset
   // (a RST is never sent in reply to a RST, RFC 9293 3.10.7.4). No RST is needed after
   // a graceful close: both FINs sent and all the client data delivered. A server
-  // FIN alone is a half close, so the client must be told when its data is lost
+  // FIN alone is a half close, so the client must be told when its data is lost.
+  // A socket error at close means that the server did not receive the client data
   if((conn->tuple.ipproto == IPPROTO_TCP) && conn->tcp.syn_received
       && !conn->tcp.client_reset && (status != CONN_STATUS_CLIENT_ERROR)
-      && !(conn->tcp.fin_ack_sent && conn->tcp.client_closed && !conn->tcp.tx_queue)) {
+      && !((status == CONN_STATUS_CLOSED) && conn->tcp.fin_ack_sent
+        && conn->tcp.client_closed && !conn->tcp.tx_queue)) {
     // Send TCP RST
     build_reply_tcpip(tun, conn, TH_RST | TH_ACK, 0, 0);
     send_to_client(tun, conn, TCP_HEADER_LEN);
@@ -1193,6 +1195,28 @@ static int finish_client_close(zdtun_t *tun, zdtun_conn_t *conn) {
   // (e.g. after an HTTP request is completed).
   if(shutdown(conn->sock, SHUT_WR) != 0)
     debug("shutdown failed[%d] %s", errno, strerror(errno));
+
+  // After the server EOF, the socket is not polled anymore, so a server RST
+  // (e.g. in reply to the client data, when the server has fully closed) is
+  // only reported here. Without this check, the close would look graceful
+  if(conn->tcp.fin_ack_sent) {
+    int optval = 0;
+    socklen_t optlen = sizeof(optval);
+
+    if(getsockopt(conn->sock, SOL_SOCKET, SO_ERROR, (char*)&optval, &optlen) == SOCKET_ERROR) {
+      error("getsockopt failed: %d", socket_errno);
+
+      zdtun_conn_close(tun, conn, CONN_STATUS_SOCKET_ERROR);
+      return -1;
+    }
+
+    if(optval != 0) {
+#ifndef WIN32
+      errno = optval;
+#endif
+      return close_with_socket_error(tun, conn, "TCP close");
+    }
+  }
 
   conn->tcp.client_seq += 1;
 

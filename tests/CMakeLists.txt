@@ -65,6 +65,8 @@ set(TCP_CLOSE_TESTS
   data_queued_after_server_eof_with_queued_upload
   rst_on_send_error_after_server_eof
   rst_after_upload_to_closed_server
+  rst_after_fin_payload_to_closed_server
+  rst_after_fin_following_upload_to_closed_server
   rst_on_idle_timeout_after_server_eof
   window_update_applied_by_fin
   window_update_applied_by_fin_retransmission
