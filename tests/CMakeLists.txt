@@ -67,7 +67,7 @@ endforeach()
 
 add_executable(stack stack.c ../zdtun.c ../utils.c)
 target_include_directories(stack PRIVATE ..)
-target_link_options(stack PRIVATE -Wl,--wrap=connect)
+target_link_options(stack PRIVATE -Wl,--wrap=connect,--wrap=socket)
 add_dependencies(run_tests stack)
 
 set(STACK_TESTS
@@ -84,6 +84,8 @@ set(STACK_TESTS
   connect_error_rst_acks_syn
   unforwarded_conn_close_sends_no_rst
   unforwarded_conn_destroy_sends_no_rst
+  tcp_socket_error_closes_conn
+  icmp_socket_error_closes_conn
   zero_window_ack_keeps_connection
   window_filled_by_in_flight_keeps_connection
   window_shrink_not_overrun

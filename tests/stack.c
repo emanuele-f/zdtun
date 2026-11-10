@@ -92,6 +92,7 @@ static char stream[STREAM_SIZE];
 static char client_rx[STREAM_SIZE];
 static uint8_t force_connect_in_progress;
 static int force_connect_error;
+static int force_socket_error;
 
 /* ******************************************************* */
 
@@ -112,6 +113,19 @@ int __wrap_connect(int sock, const struct sockaddr *addr, socklen_t addr_len) {
   }
 
   return rv;
+}
+
+/* ******************************************************* */
+
+int __real_socket(int domain, int type, int protocol);
+
+int __wrap_socket(int domain, int type, int protocol) {
+  if(force_socket_error) {
+    errno = force_socket_error;
+    return -1;
+  }
+
+  return __real_socket(domain, type, protocol);
 }
 
 /* ******************************************************* */
@@ -813,6 +827,70 @@ static void test_unforwarded_conn_destroy_sends_no_rst() {
   assert(ctx.num_rsts == 0);
   assert(ctx.num_closes == 1);
   assert(ctx.close_status == CONN_STATUS_CLOSED);
+}
+
+/* ******************************************************* */
+
+// Like PCAPdroid, which closes the connection when zdtun_forward fails
+static void forward_with_socket_error(test_ctx_t *ctx, const char *buf, int len) {
+  zdtun_pkt_t pkt;
+
+  assert(zdtun_parse_pkt(ctx->tun, buf, len, &pkt) == 0);
+
+  zdtun_conn_t *conn = zdtun_lookup(ctx->tun, &pkt.tuple, 1);
+  assert(conn != NULL);
+
+  force_socket_error = EMFILE;
+  assert(zdtun_forward(ctx->tun, &pkt, conn) != 0);
+  force_socket_error = 0;
+
+  assert(zdtun_conn_get_status(conn) == CONN_STATUS_SOCKET_ERROR);
+  zdtun_conn_close(ctx->tun, conn, CONN_STATUS_ERROR);
+}
+
+/* ******************************************************* */
+
+static void test_tcp_socket_error_closes_conn() {
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  char *buf = alloc_syn(&ctx, 5, 5);
+  forward_with_socket_error(&ctx, buf, IPV4_TCP_HEADERS_LEN);
+  free(buf);
+
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_SOCKET_ERROR);
+  assert(ctx.num_rsts == 1);
+  assert(ctx.last_ack == (CLIENT_ISN + 1));
+
+  test_finalize_unconnected(&ctx);
+
+  assert(ctx.num_closes == 1);
+  assert(ctx.num_rsts == 1);
+}
+
+/* ******************************************************* */
+
+static void test_icmp_socket_error_closes_conn() {
+  char buf[sizeof(struct iphdr) + sizeof(struct icmphdr)] __attribute__((aligned(4)));
+  test_ctx_t ctx;
+  test_init(&ctx);
+
+  int iphdr_len = client_iphdr(&ctx, buf, IPPROTO_ICMP, sizeof(struct icmphdr));
+  struct icmphdr *icmp = (struct icmphdr*) (buf + iphdr_len);
+
+  memset(icmp, 0, sizeof(*icmp));
+  icmp->type = ICMP_ECHO;
+  icmp->un.echo.id = htons(CLIENT_PORT);
+
+  forward_with_socket_error(&ctx, buf, sizeof(buf));
+
+  assert(ctx.num_closes == 1);
+  assert(ctx.close_status == CONN_STATUS_SOCKET_ERROR);
+
+  test_finalize_unconnected(&ctx);
+
+  assert(ctx.num_closes == 1);
 }
 
 /* ******************************************************* */
@@ -1600,6 +1678,8 @@ static const test_t tests[] = {
   {"connect_error_rst_acks_syn", test_connect_error_rst_acks_syn},
   {"unforwarded_conn_close_sends_no_rst", test_unforwarded_conn_close_sends_no_rst},
   {"unforwarded_conn_destroy_sends_no_rst", test_unforwarded_conn_destroy_sends_no_rst},
+  {"tcp_socket_error_closes_conn", test_tcp_socket_error_closes_conn},
+  {"icmp_socket_error_closes_conn", test_icmp_socket_error_closes_conn},
   {"zero_window_ack_keeps_connection", test_zero_window_ack_keeps_connection},
   {"window_filled_by_in_flight_keeps_connection", test_window_filled_by_in_flight_keeps_connection},
   {"window_shrink_not_overrun", test_window_shrink_not_overrun},
