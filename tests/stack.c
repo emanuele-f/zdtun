@@ -28,26 +28,11 @@
  * zdtun replies, and as the server, via a loopback socket.
  */
 
-// the tests must not become no-op on release builds
-#undef NDEBUG
+#include "test_utils.h"
 
-#include <assert.h>
-#include <signal.h>
-#include <sys/select.h>
-#include <sys/socket.h>
-#include "zdtun.h"
-#include "third_party/net_headers.h"
-
-#define CLIENT_IP "10.0.0.2"
-#define SERVER_IP "127.0.0.1"
 #define CLIENT_IP6 "fd00::2"
 #define SERVER_IP6 "fd00::1"
-#define CLIENT_PORT 12345
-#define CLIENT_ISN 1000
-#define CLIENT_WINDOW 65535
 #define IPV4_TCP_HEADERS_LEN (sizeof(struct iphdr) + sizeof(struct tcphdr))
-#define MAX_TCP_HEADERS_LEN (sizeof(struct ipv6_hdr) + sizeof(struct tcphdr))
-#define MAX_TCP_OPTIONS_LEN 40
 #define TCP_OPT_MSS 2
 #define TCP_OPT_MSS_LEN 4
 #define TCP_OPT_END 0
@@ -56,39 +41,10 @@
 #define TCP_OPT_WSCALE_LEN 3
 #define MAX_WINDOW_SCALE 14
 #define DEFAULT_MTU 1500
-#define PAYLOAD_SIZE 1000
-#define STREAM_SIZE 200000
-#define IO_TIMEOUT_SEC 5
 #define POLL_TIMEOUT_USEC 100000
 #define SOCKS5_REQ_LEN 10
 #define SOCKS5_REQ6_LEN 22
 
-typedef struct {
-  zdtun_t *tun;
-  uint8_t ipver;
-  zdtun_ip_t client_ip;
-  zdtun_ip_t server_ip;
-  int listen_sock;
-  int server_sock;
-  int zdtun_sock;
-  uint16_t server_port;
-  uint32_t client_seq;
-  uint32_t server_seq;
-  uint32_t last_ack;
-  uint16_t client_window;
-  uint16_t syn_ack_window;
-  int syn_ack_wscale;
-  int num_server_fins;
-  int max_pkt_len;
-  int rx_len;
-  int num_rsts;
-  int num_closes;
-  zdtun_conn_status_t close_status;
-  uint8_t syn_ack_received;
-  uint8_t fail_rst;
-} test_ctx_t;
-
-static char stream[STREAM_SIZE];
 static char client_rx[STREAM_SIZE];
 static uint8_t force_connect_in_progress;
 static int force_connect_error;
@@ -267,97 +223,6 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
 
 /* ******************************************************* */
 
-static void on_socket_open(zdtun_t *tun, socket_t sock) {
-  test_ctx_t *ctx = (test_ctx_t*) zdtun_userdata(tun);
-
-  ctx->zdtun_sock = sock;
-}
-
-/* ******************************************************* */
-
-static void on_connection_close(zdtun_t *tun, const zdtun_conn_t *conn_info) {
-  test_ctx_t *ctx = (test_ctx_t*) zdtun_userdata(tun);
-
-  ctx->num_closes++;
-  ctx->close_status = zdtun_conn_get_status(conn_info);
-}
-
-/* ******************************************************* */
-
-// Writes the IP header of a client packet, returning its length
-static int client_iphdr(test_ctx_t *ctx, char *buf, uint8_t ipproto, int l4_len) {
-  if(ctx->ipver == 4) {
-    struct iphdr *ip = (struct iphdr*) buf;
-
-    memset(ip, 0, sizeof(*ip));
-    ip->version = 4;
-    ip->ihl = 5;
-    ip->tot_len = htons(sizeof(*ip) + l4_len);
-    ip->ttl = 64;
-    ip->protocol = ipproto;
-    ip->saddr = ctx->client_ip.ip4;
-    ip->daddr = ctx->server_ip.ip4;
-
-    return sizeof(*ip);
-  } else {
-    struct ipv6_hdr *ip = (struct ipv6_hdr*) buf;
-
-    memset(ip, 0, sizeof(*ip));
-    ip->version = 6;
-    ip->payload_len = htons(l4_len);
-    ip->nexthdr = ipproto;
-    ip->hop_limit = 64;
-    ip->saddr = ctx->client_ip.ip6;
-    ip->daddr = ctx->server_ip.ip6;
-
-    return sizeof(*ip);
-  }
-}
-
-/* ******************************************************* */
-
-static void client_send(test_ctx_t *ctx, uint8_t flags, const uint8_t *opts, int opts_len,
-        const char *data, int len) {
-  static char buf[MAX_TCP_HEADERS_LEN + MAX_TCP_OPTIONS_LEN + PAYLOAD_SIZE] __attribute__((aligned(4)));
-  int l4_len = sizeof(struct tcphdr) + opts_len + len;
-
-  assert((opts_len % 4) == 0);
-  assert(opts_len <= MAX_TCP_OPTIONS_LEN);
-  assert(len <= PAYLOAD_SIZE);
-
-  int iphdr_len = client_iphdr(ctx, buf, IPPROTO_TCP, l4_len);
-  struct tcphdr *tcp = (struct tcphdr*) (buf + iphdr_len);
-  int pkt_len = iphdr_len + l4_len;
-
-  memset(tcp, 0, sizeof(*tcp));
-
-  tcp->th_sport = htons(CLIENT_PORT);
-  tcp->th_dport = htons(ctx->server_port);
-  tcp->th_seq = htonl(ctx->client_seq);
-  tcp->th_ack = htonl(ctx->server_seq);
-  tcp->th_off = 5 + (opts_len / 4);
-  tcp->th_flags = flags;
-  tcp->th_win = htons(ctx->client_window);
-
-  if(opts_len > 0)
-    memcpy(buf + iphdr_len + sizeof(struct tcphdr), opts, opts_len);
-
-  if(len > 0)
-    memcpy(buf + iphdr_len + sizeof(struct tcphdr) + opts_len, data, len);
-
-  assert(zdtun_easy_forward(ctx->tun, buf, pkt_len) != NULL);
-
-  ctx->client_seq += len + ((flags & (TH_SYN | TH_FIN)) ? 1 : 0);
-}
-
-/* ******************************************************* */
-
-static void client_ack(test_ctx_t *ctx) {
-  client_send(ctx, TH_ACK, NULL, 0, NULL, 0);
-}
-
-/* ******************************************************* */
-
 // Acknowledges the data only up to the ack sequence number
 static void client_ack_up_to(test_ctx_t *ctx, uint32_t ack) {
   uint32_t server_seq = ctx->server_seq;
@@ -372,24 +237,7 @@ static void client_ack_up_to(test_ctx_t *ctx, uint32_t ack) {
 static void client_syn_with_window(test_ctx_t *ctx, uint16_t window) {
   ctx->client_seq = CLIENT_ISN;
   ctx->client_window = window;
-  client_send(ctx, TH_SYN, NULL, 0, NULL, 0);
-}
-
-/* ******************************************************* */
-
-// Handles a single batch of socket events
-static void process_events(test_ctx_t *ctx) {
-  fd_set rd_fds;
-  fd_set wr_fds;
-  int max_fd = 0;
-  struct timeval timeout = {.tv_sec = IO_TIMEOUT_SEC};
-
-  zdtun_fds(ctx->tun, &max_fd, &rd_fds, &wr_fds);
-
-  int num_ready = select(max_fd + 1, &rd_fds, &wr_fds, NULL, &timeout);
-  assert(num_ready > 0);
-
-  zdtun_handle_fd(ctx->tun, &rd_fds, &wr_fds);
+  client_send(ctx, TH_SYN, NULL, 0);
 }
 
 /* ******************************************************* */
@@ -410,103 +258,6 @@ static void poll_events(test_ctx_t *ctx) {
 
 /* ******************************************************* */
 
-static int zdtun_polls_reads(test_ctx_t *ctx) {
-  fd_set rd_fds;
-  fd_set wr_fds;
-  int max_fd = 0;
-
-  zdtun_fds(ctx->tun, &max_fd, &rd_fds, &wr_fds);
-
-  for(int fd = 0; fd <= max_fd; fd++) {
-    if(FD_ISSET(fd, &rd_fds))
-      return 1;
-  }
-
-  return 0;
-}
-
-/* ******************************************************* */
-
-static void set_recv_timeout(int sock) {
-  struct timeval timeout = {.tv_sec = IO_TIMEOUT_SEC};
-  int rv = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-
-  assert(rv == 0);
-}
-
-/* ******************************************************* */
-
-static void open_listen_socket(test_ctx_t *ctx) {
-  struct sockaddr_in addr = {0};
-  socklen_t addr_len = sizeof(addr);
-
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = inet_addr(SERVER_IP);
-
-  ctx->listen_sock = socket(AF_INET, SOCK_STREAM, 0);
-  assert(ctx->listen_sock >= 0);
-
-  set_recv_timeout(ctx->listen_sock);
-
-  assert(bind(ctx->listen_sock, (struct sockaddr*) &addr, sizeof(addr)) == 0);
-  assert(listen(ctx->listen_sock, 1) == 0);
-  assert(getsockname(ctx->listen_sock, (struct sockaddr*) &addr, &addr_len) == 0);
-
-  ctx->server_port = ntohs(addr.sin_port);
-}
-
-/* ******************************************************* */
-
-// Separated from test_connect to allow configuring the tun before the SYN
-static void test_init(test_ctx_t *ctx) {
-  static zdtun_callbacks_t callbacks = {
-    .send_client = on_send_client,
-    .on_socket_open = on_socket_open,
-    .on_connection_close = on_connection_close,
-  };
-
-  memset(ctx, 0, sizeof(*ctx));
-
-  ctx->ipver = 4;
-  ctx->client_ip.ip4 = inet_addr(CLIENT_IP);
-  ctx->server_ip.ip4 = inet_addr(SERVER_IP);
-
-  for(int i = 0; i < STREAM_SIZE; i++)
-    stream[i] = (char) (i % 251);
-
-  open_listen_socket(ctx);
-
-  ctx->tun = zdtun_init(&callbacks, ctx);
-  assert(ctx->tun != NULL);
-}
-
-/* ******************************************************* */
-
-static void accept_server_sock(test_ctx_t *ctx) {
-  ctx->server_sock = accept(ctx->listen_sock, NULL, NULL);
-  assert(ctx->server_sock >= 0);
-
-  set_recv_timeout(ctx->server_sock);
-}
-
-/* ******************************************************* */
-
-// Establishes a connection from the client to the server, via zdtun
-static void test_connect(test_ctx_t *ctx, const uint8_t *syn_opts, int syn_opts_len) {
-  ctx->client_seq = CLIENT_ISN;
-  ctx->client_window = CLIENT_WINDOW;
-  client_send(ctx, TH_SYN, syn_opts, syn_opts_len, NULL, 0);
-
-  // A loopback connect can either complete immediately or be in progress
-  while(!ctx->syn_ack_received)
-    process_events(ctx);
-
-  accept_server_sock(ctx);
-  client_ack(ctx);
-}
-
-/* ******************************************************* */
-
 static void test_connect_with_mss(test_ctx_t *ctx, uint16_t mss) {
   uint8_t opts[TCP_OPT_MSS_LEN] = {TCP_OPT_MSS, TCP_OPT_MSS_LEN, mss >> 8, mss & 0xFF};
 
@@ -516,16 +267,8 @@ static void test_connect_with_mss(test_ctx_t *ctx, uint16_t mss) {
 /* ******************************************************* */
 
 static void test_setup_with_mss(test_ctx_t *ctx, uint16_t mss) {
-  test_init(ctx);
+  test_init(ctx, on_send_client);
   test_connect_with_mss(ctx, mss);
-}
-
-/* ******************************************************* */
-
-static void test_teardown(test_ctx_t *ctx) {
-  zdtun_finalize(ctx->tun);
-  close(ctx->server_sock);
-  close(ctx->listen_sock);
 }
 
 /* ******************************************************* */
@@ -577,7 +320,7 @@ static void test_mss_clamped_to_configured_mtu() {
   int mtu = 1000;
   test_ctx_t ctx;
 
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
   zdtun_set_mtu(ctx.tun, mtu);
   test_connect_with_mss(&ctx, DEFAULT_MTU - IPV4_TCP_HEADERS_LEN);
 
@@ -662,37 +405,30 @@ static int parse_syn(test_ctx_t *ctx, uint8_t ihl, uint8_t th_off) {
 
 /* ******************************************************* */
 
-static void test_finalize_unconnected(test_ctx_t *ctx) {
-  zdtun_finalize(ctx->tun);
-  close(ctx->listen_sock);
-}
-
-/* ******************************************************* */
-
 static void test_short_tcp_data_offset_rejected() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   for(uint8_t th_off = 0; th_off < 5; th_off++)
     assert(parse_syn(&ctx, 5, th_off) == -1);
 
   assert(parse_syn(&ctx, 5, 5) == 0);
 
-  test_finalize_unconnected(&ctx);
+  test_teardown(&ctx);
 }
 
 /* ******************************************************* */
 
 static void test_short_ipv4_ihl_rejected() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   for(uint8_t ihl = 0; ihl < 5; ihl++)
     assert(parse_syn(&ctx, ihl, 5) == -1);
 
   assert(parse_syn(&ctx, 5, 5) == 0);
 
-  test_finalize_unconnected(&ctx);
+  test_teardown(&ctx);
 }
 
 /* ******************************************************* */
@@ -700,7 +436,7 @@ static void test_short_ipv4_ihl_rejected() {
 // The options length would underflow, reading the options past the end of the packet
 static void test_syn_short_data_offset_not_forwarded() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   char *buf = alloc_syn(&ctx, 5, 0);
 
@@ -708,7 +444,7 @@ static void test_syn_short_data_offset_not_forwarded() {
   assert(!ctx.syn_ack_received);
 
   free(buf);
-  test_finalize_unconnected(&ctx);
+  test_teardown(&ctx);
 }
 
 /* ******************************************************* */
@@ -781,7 +517,7 @@ static void test_failed_rst_on_destroy_closes_once() {
 // A client in SYN_SENT only accepts a RST which acknowledges its SYN
 static void test_connect_error_rst_acks_syn() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   force_connect_error = ENETUNREACH;
   client_syn_with_window(&ctx, CLIENT_WINDOW);
@@ -793,7 +529,7 @@ static void test_connect_error_rst_acks_syn() {
   assert(ctx.num_closes == 1);
   assert(ctx.close_status == CONN_STATUS_UNREACHABLE);
 
-  test_finalize_unconnected(&ctx);
+  test_teardown(&ctx);
 }
 
 /* ******************************************************* */
@@ -801,7 +537,7 @@ static void test_connect_error_rst_acks_syn() {
 // Like a connection blocked by the integrator, which is created but never forwarded
 static void test_unforwarded_conn_close_sends_no_rst() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   zdtun_conn_t *conn = lookup_client_conn(&ctx, 1);
   zdtun_conn_close(ctx.tun, conn, CONN_STATUS_CLOSED);
@@ -809,7 +545,7 @@ static void test_unforwarded_conn_close_sends_no_rst() {
   assert(ctx.num_rsts == 0);
   assert(ctx.num_closes == 1);
 
-  test_finalize_unconnected(&ctx);
+  test_teardown(&ctx);
 
   assert(ctx.num_rsts == 0);
   assert(ctx.num_closes == 1);
@@ -819,12 +555,12 @@ static void test_unforwarded_conn_close_sends_no_rst() {
 
 static void test_unforwarded_conn_destroy_sends_no_rst() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   zdtun_conn_t *conn = lookup_client_conn(&ctx, 1);
   assert(zdtun_conn_get_status(conn) == CONN_STATUS_NEW);
 
-  test_finalize_unconnected(&ctx);
+  test_teardown(&ctx);
 
   assert(ctx.num_rsts == 0);
   assert(ctx.num_closes == 1);
@@ -854,7 +590,7 @@ static void forward_with_socket_error(test_ctx_t *ctx, const char *buf, int len)
 
 static void test_tcp_socket_error_closes_conn() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   char *buf = alloc_syn(&ctx, 5, 5);
   forward_with_socket_error(&ctx, buf, IPV4_TCP_HEADERS_LEN);
@@ -865,7 +601,7 @@ static void test_tcp_socket_error_closes_conn() {
   assert(ctx.num_rsts == 1);
   assert(ctx.last_ack == (CLIENT_ISN + 1));
 
-  test_finalize_unconnected(&ctx);
+  test_teardown(&ctx);
 
   assert(ctx.num_closes == 1);
   assert(ctx.num_rsts == 1);
@@ -876,7 +612,7 @@ static void test_tcp_socket_error_closes_conn() {
 static void test_icmp_socket_error_closes_conn() {
   char buf[sizeof(struct iphdr) + sizeof(struct icmphdr)] __attribute__((aligned(4)));
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   int iphdr_len = client_iphdr(&ctx, buf, IPPROTO_ICMP, sizeof(struct icmphdr));
   struct icmphdr *icmp = (struct icmphdr*) (buf + iphdr_len);
@@ -890,7 +626,7 @@ static void test_icmp_socket_error_closes_conn() {
   assert(ctx.num_closes == 1);
   assert(ctx.close_status == CONN_STATUS_SOCKET_ERROR);
 
-  test_finalize_unconnected(&ctx);
+  test_teardown(&ctx);
 
   assert(ctx.num_closes == 1);
 }
@@ -1018,7 +754,7 @@ static void test_window_shrink_not_overrun() {
 
 static void test_zero_window_syn_keeps_connection() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   client_syn_with_window(&ctx, 0);
 
@@ -1044,7 +780,7 @@ static void test_zero_window_syn_keeps_connection() {
 // The connect result must not be hidden by the readable event of the server data
 static void test_zero_window_syn_connect_in_progress() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   force_connect_in_progress = 1;
   client_syn_with_window(&ctx, 0);
@@ -1097,21 +833,18 @@ static void test_stale_read_event_with_zero_window() {
 
 static void test_zero_window_upload_delivered() {
   test_ctx_t ctx;
-  char rx[PAYLOAD_SIZE];
-
   test_setup_with_mss(&ctx, PAYLOAD_SIZE);
   server_send(&ctx, PAYLOAD_SIZE);
 
   ctx.client_window = 0;
-  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream, PAYLOAD_SIZE);
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
 
   process_events(&ctx);
 
   assert_connection_alive(&ctx);
   assert(ctx.rx_len == 0);
 
-  assert(recv(ctx.server_sock, rx, PAYLOAD_SIZE, MSG_WAITALL) == PAYLOAD_SIZE);
-  assert(memcmp(rx, stream, PAYLOAD_SIZE) == 0);
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
 
   assert_data_flows_after_window_update(&ctx, PAYLOAD_SIZE);
 
@@ -1128,7 +861,7 @@ static void test_zero_window_syn_socks5_handshake() {
   const char srv_choice[] = {5, 0};
   const char connect_reply[SOCKS5_REQ_LEN] = {5, 0, 0, 1};
 
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   proxy_ip.ip4 = inet_addr(SERVER_IP);
   zdtun_set_socks5_proxy(ctx.tun, &proxy_ip, htons(ctx.server_port), 4);
@@ -1174,7 +907,7 @@ static void connect_with_window_scale(test_ctx_t *ctx, uint16_t window, uint8_t 
 
   ctx->client_seq = CLIENT_ISN;
   ctx->client_window = window;
-  client_send(ctx, TH_SYN, opts, sizeof(opts), NULL, 0);
+  client_send_opts(ctx, TH_SYN, opts, sizeof(opts), NULL, 0);
 
   while(!ctx->syn_ack_received)
     process_events(ctx);
@@ -1186,7 +919,7 @@ static void connect_with_window_scale(test_ctx_t *ctx, uint16_t window, uint8_t 
 
 static void test_large_window_scale_clamped() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   connect_with_window_scale(&ctx, 1, 200);
 
@@ -1212,7 +945,7 @@ static void test_large_window_scale_clamped() {
 
 static void test_syn_window_not_scaled() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   connect_with_window_scale(&ctx, PAYLOAD_SIZE, 7);
   server_send(&ctx, 5 * PAYLOAD_SIZE);
@@ -1233,7 +966,7 @@ static void test_syn_window_not_scaled() {
 
 static void test_syn_ack_window_not_scaled() {
   test_ctx_t ctx;
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
 
   connect_with_window_scale(&ctx, CLIENT_WINDOW, 7);
   assert(ctx.syn_ack_wscale == 7);
@@ -1296,7 +1029,7 @@ static void connect_in_progress(test_ctx_t *ctx) {
 static void test_server_data_before_connect_handled() {
   test_ctx_t ctx;
 
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
   connect_in_progress(&ctx);
   server_send(&ctx, PAYLOAD_SIZE);
 
@@ -1322,7 +1055,7 @@ static void test_server_data_before_connect_handled() {
 static void test_server_eof_before_connect_handled() {
   test_ctx_t ctx;
 
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
   connect_in_progress(&ctx);
 
   close(ctx.server_sock);
@@ -1350,7 +1083,7 @@ static void test_server_reset_before_connect_handled() {
   test_ctx_t ctx;
   struct linger linger = {.l_onoff = 1, .l_linger = 0};
 
-  test_init(&ctx);
+  test_init(&ctx, on_send_client);
   connect_in_progress(&ctx);
 
   zdtun_conn_t *conn = lookup_client_conn(&ctx, 0);
@@ -1376,7 +1109,7 @@ static void client_retransmit(test_ctx_t *ctx, uint8_t flags, uint32_t seq, cons
   uint32_t client_seq = ctx->client_seq;
 
   ctx->client_seq = seq;
-  client_send(ctx, flags, NULL, 0, data, len);
+  client_send(ctx, flags, data, len);
 
   if(!(flags & TH_FIN))
     ctx->client_seq = client_seq;
@@ -1392,7 +1125,7 @@ static void test_retransmitted_byte_delivered_once() {
 
   uint32_t data_seq = ctx.client_seq;
 
-  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream, 1);
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, 1);
   process_events(&ctx);
 
   assert(ctx.last_ack == ctx.client_seq);
@@ -1401,13 +1134,12 @@ static void test_retransmitted_byte_delivered_once() {
 
   assert(ctx.last_ack == ctx.client_seq);
 
-  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream + 1, PAYLOAD_SIZE - 1);
+  client_send(&ctx, TH_ACK | TH_PUSH, stream + 1, PAYLOAD_SIZE - 1);
   process_events(&ctx);
 
   assert(ctx.last_ack == ctx.client_seq);
 
-  assert(recv(ctx.server_sock, rx, PAYLOAD_SIZE, MSG_WAITALL) == PAYLOAD_SIZE);
-  assert(memcmp(rx, stream, PAYLOAD_SIZE) == 0);
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
   assert(recv(ctx.server_sock, rx, sizeof(rx), MSG_DONTWAIT) < 0);
 
   assert_connection_alive(&ctx);
@@ -1426,7 +1158,7 @@ static void test_retransmitted_byte_with_fin_delivered_once() {
 
   uint32_t data_seq = ctx.client_seq;
 
-  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream, 1);
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, 1);
   process_events(&ctx);
 
   client_retransmit(&ctx, TH_FIN | TH_ACK | TH_PUSH, data_seq, stream, 1);
@@ -1447,17 +1179,13 @@ static void test_retransmitted_byte_acked_once_after_server_close() {
 
   test_setup_with_mss(&ctx, PAYLOAD_SIZE);
 
-  close(ctx.server_sock);
-  ctx.server_sock = -1;
-
-  // zdtun reads the server EOF and closes its own socket
-  process_events(&ctx);
+  close_server_socket(&ctx);
 
   assert(ctx.num_server_fins == 1);
 
   uint32_t data_seq = ctx.client_seq;
 
-  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream, 1);
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, 1);
 
   assert(ctx.last_ack == ctx.client_seq);
 
@@ -1465,7 +1193,7 @@ static void test_retransmitted_byte_acked_once_after_server_close() {
 
   assert(ctx.last_ack == ctx.client_seq);
 
-  client_send(&ctx, TH_ACK | TH_PUSH, NULL, 0, stream + 1, PAYLOAD_SIZE - 1);
+  client_send(&ctx, TH_ACK | TH_PUSH, stream + 1, PAYLOAD_SIZE - 1);
 
   assert(ctx.last_ack == ctx.client_seq);
   assert(ctx.num_closes == 0);
@@ -1476,7 +1204,7 @@ static void test_retransmitted_byte_acked_once_after_server_close() {
 /* ******************************************************* */
 
 static void test_init_ipv6(test_ctx_t *ctx) {
-  test_init(ctx);
+  test_init(ctx, on_send_client);
 
   ctx->ipver = 6;
   assert(inet_pton(AF_INET6, CLIENT_IP6, &ctx->client_ip.ip6) == 1);
@@ -1514,14 +1242,11 @@ static void dnat_to_ipv4_server(test_ctx_t *ctx, uint8_t ipproto) {
 /* ******************************************************* */
 
 static void assert_upload_delivered(test_ctx_t *ctx) {
-  char rx[PAYLOAD_SIZE];
-
-  client_send(ctx, TH_ACK | TH_PUSH, NULL, 0, stream, PAYLOAD_SIZE);
+  client_send(ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
   process_events(ctx);
 
   assert(ctx->last_ack == ctx->client_seq);
-  assert(recv(ctx->server_sock, rx, PAYLOAD_SIZE, MSG_WAITALL) == PAYLOAD_SIZE);
-  assert(memcmp(rx, stream, PAYLOAD_SIZE) == 0);
+  assert(server_received_stream(ctx, PAYLOAD_SIZE));
 }
 
 /* ******************************************************* */
@@ -1709,11 +1434,6 @@ static void test_ipv6_client_ipv4_socks5_proxy() {
 
 /* ******************************************************* */
 
-typedef struct {
-  const char *name;
-  void (*run)();
-} test_t;
-
 static const test_t tests[] = {
   {"large_mss_clamped_to_mtu", test_large_mss_clamped_to_mtu},
   {"mss_clamped_to_configured_mtu", test_mss_clamped_to_configured_mtu},
@@ -1757,21 +1477,5 @@ static const test_t tests[] = {
 /* ******************************************************* */
 
 int main(int argc, char **argv) {
-  if(argc != 2) {
-    fprintf(stderr, "Usage: %s test_name\n", argv[0]);
-    return 2;
-  }
-
-  // a send on a closed socket must fail with EPIPE, like in the zdtun integrations
-  signal(SIGPIPE, SIG_IGN);
-
-  for(size_t i = 0; i < (sizeof(tests) / sizeof(tests[0])); i++) {
-    if(!strcmp(argv[1], tests[i].name)) {
-      tests[i].run();
-      return 0;
-    }
-  }
-
-  fprintf(stderr, "Unknown test: %s\n", argv[1]);
-  return 2;
+  return run_test(argc, argv, tests, sizeof(tests) / sizeof(tests[0]));
 }

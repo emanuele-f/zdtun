@@ -14,7 +14,7 @@ endif()
 
 add_custom_target(run_tests COMMAND CTEST_OUTPUT_ON_FAILURE=1 ${CMAKE_CTEST_COMMAND})
 
-add_executable(tcp_close tcp_close.c ../zdtun.c ../utils.c)
+add_executable(tcp_close tcp_close.c test_utils.c ../zdtun.c ../utils.c)
 target_include_directories(tcp_close PRIVATE ..)
 target_link_options(tcp_close PRIVATE -Wl,--wrap=send,--wrap=shutdown,--wrap=clock_gettime)
 add_dependencies(run_tests tcp_close)
@@ -65,7 +65,7 @@ foreach(TEST_NAME ${TCP_CLOSE_TESTS})
   add_test(NAME tcp_close_${TEST_NAME} COMMAND tcp_close ${TEST_NAME})
 endforeach()
 
-add_executable(stack stack.c ../zdtun.c ../utils.c)
+add_executable(stack stack.c test_utils.c ../zdtun.c ../utils.c)
 target_include_directories(stack PRIVATE ..)
 target_link_options(stack PRIVATE -Wl,--wrap=connect,--wrap=socket)
 add_dependencies(run_tests stack)
