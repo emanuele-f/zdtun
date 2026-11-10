@@ -54,6 +54,7 @@ typedef struct {
   uint16_t server_port;
   uint32_t client_seq;
   uint32_t server_seq;
+  uint32_t server_next_seq;
   uint32_t last_ack;
   uint16_t client_window;
   uint16_t syn_ack_window;

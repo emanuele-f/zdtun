@@ -93,11 +93,22 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
   if(pkt->tcp->th_flags & TH_SYN) {
     ctx->syn_ack_received = 1;
     ctx->server_seq = ntohl(pkt->tcp->th_seq) + 1;
+    ctx->server_next_seq = ctx->server_seq;
   } else if(pkt->tcp->th_flags & TH_ACK)
     ctx->last_ack = ntohl(pkt->tcp->th_ack);
 
-  if(pkt->tcp->th_flags & TH_FIN)
+  // server_seq is advanced by the tests to choose what to ACK, server_next_seq follows what
+  // was received. A RST is only accepted if its sequence number is exactly the next expected one
+  // (RFC 5961 3.2)
+  if(!(pkt->tcp->th_flags & TH_SYN) && ctx->syn_ack_received) {
+    assert(ntohl(pkt->tcp->th_seq) == ctx->server_next_seq);
+    ctx->server_next_seq += pkt->l7_len;
+  }
+
+  if(pkt->tcp->th_flags & TH_FIN) {
     ctx->num_server_fins++;
+    ctx->server_next_seq += 1;
+  }
 
   if(pkt->tcp->th_flags & TH_RST)
     ctx->num_rsts++;

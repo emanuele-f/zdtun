@@ -184,6 +184,15 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
     return 0;
   }
 
+  // The client is in SYN_SENT until the SYN+ACK
+  if(!(pkt->tcp->th_flags & (TH_SYN | TH_RST)))
+    assert(ctx->syn_ack_received);
+
+  // A RST is only accepted if its sequence number is exactly the next expected one
+  // (RFC 5961 3.2), except in SYN_SENT, where only its ACK is checked (RFC 9293 3.10.7.3)
+  if(!(pkt->tcp->th_flags & TH_SYN) && ctx->syn_ack_received)
+    assert(ntohl(pkt->tcp->th_seq) == ctx->server_seq);
+
   if(pkt->tcp->th_flags & TH_RST) {
     ctx->num_rsts++;
 
@@ -196,12 +205,6 @@ static int on_send_client(zdtun_t *tun, zdtun_pkt_t *pkt, const zdtun_conn_t *co
 
   if(pkt->tcp->th_flags & TH_ACK)
     ctx->last_ack = ntohl(pkt->tcp->th_ack);
-
-  if(!(pkt->tcp->th_flags & (TH_SYN | TH_RST))) {
-    // The client is in SYN_SENT until the SYN+ACK
-    assert(ctx->syn_ack_received);
-    assert(ntohl(pkt->tcp->th_seq) == ctx->server_seq);
-  }
 
   // The data is queued until the client ACKs the SYN+ACK (RFC 9293 3.10.2)
   if(pkt->l7_len > 0)
