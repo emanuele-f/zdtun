@@ -1385,7 +1385,18 @@ static int handle_tcp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt,
     ((seq + pkt->l7_len + 1) == conn->tcp.client_seq));
 
   if(!is_keep_alive && !is_after_queued_fin && !is_fin_retransmission && (seq != expected_seq)) {
-    debug("ignoring out of sequence data: expected %d, got %d", expected_seq, seq);
+    debug("out of sequence data: expected %u, got %u", expected_seq, seq);
+
+    // Reply with a duplicate ACK, so that the client can resync (RFC 9293 3.10.7.4).
+    // Like Linux, segments without ACK are dropped and pure ACKs are not replied,
+    // to avoid ACK loops
+    if(((data->th_flags & (TH_RST | TH_SYN | TH_ACK)) == TH_ACK) &&
+        ((pkt->l7_len > 0) || (data->th_flags & TH_FIN)) &&
+        !socks5_in_progress(conn)) {
+      build_reply_tcpip(tun, conn, TH_ACK, 0, 0);
+      return send_to_client(tun, conn, TCP_HEADER_LEN);
+    }
+
     return 0;
   }
 

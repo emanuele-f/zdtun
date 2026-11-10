@@ -55,7 +55,10 @@ set(TCP_CLOSE_TESTS
   fin_payload_retransmission_after_close
   fin_payload_retransmission_seq_wrap
   fin_payload_retransmission_while_queued
-  non_fin_ignored_at_fin_payload_seq
+  non_fin_dup_acked_at_fin_payload_seq
+  old_segment_dup_acked
+  future_segment_dup_acked
+  old_pure_ack_not_replied
   queued_upload_not_acked_at_server_eof
   partially_sent_upload_delivered_after_server_eof
   fin_acked_after_server_eof_with_queued_upload

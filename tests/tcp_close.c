@@ -1085,26 +1085,105 @@ static void test_fin_payload_retransmission_while_queued() {
 
 /* ******************************************************* */
 
-static void test_non_fin_ignored_at_fin_payload_seq() {
+static void test_non_fin_dup_acked_at_fin_payload_seq() {
   test_ctx_t ctx;
   test_setup(&ctx);
 
   uint32_t data_seq = ctx.client_seq;
+  uint32_t fin_ack = data_seq + PAYLOAD_SIZE + 1;
 
   client_send(&ctx, TH_FIN | TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
   process_events(&ctx);
 
   int num_replies = ctx.num_replies;
 
+  // an old segment is answered with a duplicate ACK (RFC 9293 3.10.7.4)
+  ctx.last_ack = 0;
   ctx.client_seq = data_seq;
   client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
 
+  assert(ctx.num_replies == (num_replies + 1));
+  assert(ctx.last_ack == fin_ack);
+
+  // a segment without ACK is dropped, like Linux does
   ctx.client_seq = data_seq;
   client_send(&ctx, TH_FIN | TH_PUSH, stream, PAYLOAD_SIZE);
 
-  assert(ctx.num_replies == num_replies);
+  assert(ctx.num_replies == (num_replies + 1));
   assert(!zdtun_polls_writes(&ctx));
   assert(server_received_payload(&ctx));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_old_segment_dup_acked() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  uint32_t data_seq = ctx.client_seq;
+
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(ctx.last_ack == (data_seq + PAYLOAD_SIZE));
+
+  ctx.num_replies = 0;
+  ctx.last_ack = 0;
+  ctx.client_seq = data_seq;
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+
+  assert(ctx.num_replies == 1);
+  assert(ctx.last_ack == (data_seq + PAYLOAD_SIZE));
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_future_segment_dup_acked() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  uint32_t data_seq = ctx.client_seq;
+
+  // the first segment is lost, the second one triggers a duplicate ACK (RFC 5681 4.2)
+  ctx.client_seq = data_seq + PAYLOAD_SIZE;
+  client_send(&ctx, TH_ACK | TH_PUSH, stream + PAYLOAD_SIZE, PAYLOAD_SIZE);
+
+  assert(ctx.num_replies == 1);
+  assert(ctx.last_ack == data_seq);
+  assert(!zdtun_polls_writes(&ctx));
+
+  ctx.client_seq = data_seq;
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  assert(ctx.last_ack == (data_seq + PAYLOAD_SIZE));
+  assert(server_received_stream(&ctx, PAYLOAD_SIZE));
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_old_pure_ack_not_replied() {
+  test_ctx_t ctx;
+  test_setup(&ctx);
+
+  uint32_t data_seq = ctx.client_seq;
+
+  client_send(&ctx, TH_ACK | TH_PUSH, stream, PAYLOAD_SIZE);
+  process_events(&ctx);
+
+  ctx.num_replies = 0;
+  ctx.client_seq = data_seq;
+  client_send(&ctx, TH_ACK, NULL, 0);
+
+  assert(ctx.num_replies == 0);
+  assert(!zdtun_polls_writes(&ctx));
 
   test_teardown(&ctx);
 }
@@ -1147,7 +1226,10 @@ static const test_t tests[] = {
   {"fin_payload_retransmission_after_close", test_fin_payload_retransmission_after_close},
   {"fin_payload_retransmission_seq_wrap", test_fin_payload_retransmission_seq_wrap},
   {"fin_payload_retransmission_while_queued", test_fin_payload_retransmission_while_queued},
-  {"non_fin_ignored_at_fin_payload_seq", test_non_fin_ignored_at_fin_payload_seq},
+  {"non_fin_dup_acked_at_fin_payload_seq", test_non_fin_dup_acked_at_fin_payload_seq},
+  {"old_segment_dup_acked", test_old_segment_dup_acked},
+  {"future_segment_dup_acked", test_future_segment_dup_acked},
+  {"old_pure_ack_not_replied", test_old_pure_ack_not_replied},
   {"queued_upload_not_acked_at_server_eof", test_queued_upload_not_acked_at_server_eof},
   {"partially_sent_upload_delivered_after_server_eof", test_partially_sent_upload_delivered_after_server_eof},
   {"fin_acked_after_server_eof_with_queued_upload", test_fin_acked_after_server_eof_with_queued_upload},
