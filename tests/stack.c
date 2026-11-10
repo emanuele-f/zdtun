@@ -1464,6 +1464,33 @@ static void test_ipv6_udp_zero_checksum_not_sent() {
 
 /* ******************************************************* */
 
+static void assert_udp_to_scoped_addr_dropped(const char *dst_ip) {
+  test_ctx_t ctx;
+
+  test_init_ipv6(&ctx);
+  assert(inet_pton(AF_INET6, dst_ip, &ctx.server_ip.ip6) == 1);
+  ctx.server_port = 5353;
+
+  // the closed connection is replaced by a new one on the next packet
+  for(int i = 1; i <= 2; i++) {
+    client_send_udp(&ctx, stream, PAYLOAD_SIZE);
+    assert(ctx.num_closes == i);
+    assert(ctx.close_status == CONN_STATUS_UNREACHABLE);
+  }
+
+  test_teardown(&ctx);
+}
+
+/* ******************************************************* */
+
+static void test_ipv6_udp_to_scoped_addr_dropped() {
+  assert_udp_to_scoped_addr_dropped("ff02::fb");
+  assert_udp_to_scoped_addr_dropped("ff01::1");
+  assert_udp_to_scoped_addr_dropped("fe80::1");
+}
+
+/* ******************************************************* */
+
 static void test_ipv6_client_ipv4_socks5_proxy() {
   test_ctx_t ctx;
   zdtun_ip_t proxy_ip = {0};
@@ -1551,6 +1578,7 @@ static const test_t tests[] = {
   {"ipv6_client_tcp_dnat_to_ipv4", test_ipv6_client_tcp_dnat_to_ipv4},
   {"ipv6_client_udp_dnat_to_ipv4", test_ipv6_client_udp_dnat_to_ipv4},
   {"ipv6_udp_zero_checksum_not_sent", test_ipv6_udp_zero_checksum_not_sent},
+  {"ipv6_udp_to_scoped_addr_dropped", test_ipv6_udp_to_scoped_addr_dropped},
   {"ipv6_client_ipv4_socks5_proxy", test_ipv6_client_ipv4_socks5_proxy},
 };
 

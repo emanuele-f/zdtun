@@ -1592,12 +1592,31 @@ static int bind_and_connect_udp(zdtun_t *tun, zdtun_conn_t *conn) {
 
 /* ******************************************************* */
 
+// Link-local and interface-local addresses need a scope ID, which cannot be
+// determined from a tunneled packet, so connect would fail with EINVAL
+static int is_ipv6_scoped_addr(const uint8_t *a) {
+  // fe80::/10 link-local unicast
+  if((a[0] == 0xFE) && ((a[1] & 0xC0) == 0x80))
+    return 1;
+
+  // ff01::/16 interface-local and ff02::/16 link-local multicast
+  return((a[0] == 0xFF) && (((a[1] & 0x0F) == 0x01) || ((a[1] & 0x0F) == 0x02)));
+}
+
+/* ******************************************************* */
+
 static int handle_udp_fwd(zdtun_t *tun, const zdtun_pkt_t *pkt, zdtun_conn_t *conn) {
   struct udphdr *data = pkt->udp;
   uint8_t ipver = sock_ipver(tun, conn);
   int family = (ipver == 4) ? PF_INET : PF_INET6;
 
   if(conn->status == CONN_STATUS_NEW) {
+    if((conn->proxy_mode == PROXY_NONE) && (ipver == 6) && is_ipv6_scoped_addr(conn->tuple.dst_ip.ip6.s6_addr)) {
+      debug("Dropping UDP6 packet to a link-local scoped address");
+      zdtun_conn_close(tun, conn, CONN_STATUS_UNREACHABLE);
+      return 0;
+    }
+
     debug("Allocating new UDP socket for port %d", ntohs(data->uh_sport));
 
     socket_t udp_sock = open_socket(tun, family, SOCK_DGRAM, IPPROTO_UDP);
