@@ -82,6 +82,34 @@ The `zdtun_gateway` is a program which routes all the local/internet connections
 through zdtun via a TUN device. It can be useful to easily test the zdtun
 functionalities locally.
 
+## Build
+
+```sh
+mkdir build && cd build
+cmake ..
+make
+```
+
+## Tests
+
+The tests live in the `tests` directory. They require clang and cmake >= 3.18,
+and are built with the address, undefined and leak sanitizers. To build and run
+all the tests:
+
+```sh
+cd tests
+make run_tests
+```
+
+To run a single test, pass its name to the test executable, or filter it via ctest:
+
+```sh
+./build/tcp_close fin_acked_after_drain
+cd build && ctest -R tcp_close_fin_acked_after_drain
+```
+
+Use `make clean` to remove the build directory.
+
 
 ## Motivation
 
